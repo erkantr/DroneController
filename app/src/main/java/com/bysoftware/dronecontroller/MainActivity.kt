@@ -49,6 +49,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.bysoftware.dronecontroller.MainActivity.Companion.TAG
 import com.bysoftware.dronecontroller.ui.theme.DroneControllerTheme
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
+import com.hoho.android.usbserial.driver.Ch34xSerialDriver
+import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
+import com.hoho.android.usbserial.driver.FtdiSerialDriver
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.util.SerialInputOutputManager
@@ -83,6 +88,7 @@ import io.reactivex.schedulers.Schedulers
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ClosedSendChannelException
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -93,6 +99,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.text.DecimalFormat
+import java.util.concurrent.TimeUnit
 
 
 // --- Telemetry State Data Class ---
@@ -143,7 +150,11 @@ class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
-        Toast.makeText(this, "İnternet izni ${if (isGranted) "verildi" else "reddedildi"}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            this,
+            "İnternet izni ${if (isGranted) "verildi" else "reddedildi"}",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -204,12 +215,16 @@ class MainActivity : ComponentActivity() {
             if (ACTION_USB_PERMISSION == intent.action) {
                 synchronized(this) {
                     // Android Tiramisu (API 33) ve sonrası için güvenli getParcelableExtra kullanımı
-                    val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION") // Eski sürümler için Suppress
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
+                    val device: UsbDevice? =
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            intent.getParcelableExtra(
+                                UsbManager.EXTRA_DEVICE,
+                                UsbDevice::class.java
+                            )
+                        } else {
+                            @Suppress("DEPRECATION") // Eski sürümler için Suppress
+                            intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                        }
                     val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
                     Log.d(TAG, "USB izin yanıtı alındı: ${device?.deviceName}, İzin: $granted")
                     // Callback null değilse çağır ve sonra null yap
@@ -226,7 +241,7 @@ class MainActivity : ComponentActivity() {
             unregisterReceiver(usbPermissionReceiver)
         } catch (e: IllegalArgumentException) {
             // Receiver zaten kayıtlı değilse hata vermesini engelle
-            Log.w(TAG,"Receiver zaten kayıtlı değildi veya kaldırılamadı.")
+            Log.w(TAG, "Receiver zaten kayıtlı değildi veya kaldırılamadı.")
         }
         usbPermissionCallback = null // Callback referansını temizle
         Log.d(TAG, "MainActivity onDestroy")
@@ -283,7 +298,8 @@ fun DroneControllerApp(
     var directParserJob by remember { mutableStateOf<Job?>(null) } // MAVLink ayrıştırma korutini (ve pipe yazarını içerir)
     // Veri kanalı: IO Manager -> PipeWriter Coroutine -> Pipe -> MavlinkConnection Parser
     // Bu kanal, IO Manager'dan gelen ham baytları pipe'a yazan korutine iletir.
-    val directDataChannel = remember { Channel<ByteArray>(Channel.BUFFERED) } // Buffer boyutu ayarlanabilir
+    val directDataChannel =
+        remember { Channel<ByteArray>(Channel.BUFFERED) } // Buffer boyutu ayarlanabilir
 
     // Direct bağlantı için MAVLink yazma (komut gönderme) OutputStream'i
     // MAVLink komutlarını göndermek için MavlinkConnection.send() metodunu kullanırken
@@ -319,7 +335,11 @@ fun DroneControllerApp(
     // Double/Float/Int değerleri formatlamak için yardımcı fonksiyonlar
     val decimalFormat = remember { DecimalFormat("#.######") } // Daha fazla hassasiyet için
     val decimalFormatShort = remember { DecimalFormat("#.##") } // Daha az hassasiyet için
-    fun Double?.format(digits: Int = 6): String = if (this == null) "N/A" else if (digits <= 2) decimalFormatShort.format(this) else decimalFormat.format(this)
+    fun Double?.format(digits: Int = 6): String =
+        if (this == null) "N/A" else if (digits <= 2) decimalFormatShort.format(this) else decimalFormat.format(
+            this
+        )
+
     fun Float?.format(digits: Int = 2): String = this?.toDouble().format(digits)
     fun Int?.format(): String = this?.toString() ?: "N/A"
 
@@ -348,13 +368,31 @@ fun DroneControllerApp(
 
         // Command OutputStream'i kapat (eğer varsa). Bu, MavlinkConnection'ın yazma ucunu kapatır.
         // Eğer bu bir PipedOutputStream ise, diğer ucun (MavlinkConnection içindeki PipeInputStream) hata vermesine neden olur.
-        try { directCommandOutputStream?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Direct] Command OutputStream kapatılırken hata", e) } finally { directCommandOutputStream = null }
+        try {
+            directCommandOutputStream?.close()
+        } catch (e: IOException) {
+            Log.e(MainActivity.TAG, "[Direct] Command OutputStream kapatılırken hata", e)
+        } finally {
+            directCommandOutputStream = null
+        }
 
 
         // USB Port ve Connection'ı kapatmadan önce null kontrolü
         // Portu kapatmak, IO Manager'ın (eğer durdurulmadıysa) hata vermesine neden olur.
-        try { directUsbPort?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Direct] USB port kapatılırken hata", e) } finally { directUsbPort = null }
-        try { directUsbConnection?.close() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Direct] USB connection kapatılırken hata", e) } finally { directUsbConnection = null }
+        try {
+            directUsbPort?.close()
+        } catch (e: IOException) {
+            Log.e(MainActivity.TAG, "[Direct] USB port kapatılırken hata", e)
+        } finally {
+            directUsbPort = null
+        }
+        try {
+            directUsbConnection?.close()
+        } catch (e: Exception) {
+            Log.e(MainActivity.TAG, "[Direct] USB connection kapatılırken hata", e)
+        } finally {
+            directUsbConnection = null
+        }
 
         Log.d(MainActivity.TAG, "[Direct] Kaynaklar temizlendi.")
     }
@@ -363,31 +401,69 @@ fun DroneControllerApp(
     fun disconnectDirectUsb(showStatus: Boolean = true) {
         // Zaten bağlı değilse veya kaynaklar temizse çık
         if (!isDirectConnected && directIoManager == null && directUsbPort == null && directParserJob == null && directDataChannel.isClosedForSend && directCommandOutputStream == null) {
-            Log.d(MainActivity.TAG, "[Direct] Zaten bağlı değil veya temizlenmiş durumda, bağlantı kesme iptal edildi.")
+            Log.d(
+                MainActivity.TAG,
+                "[Direct] Zaten bağlı değil veya temizlenmiş durumda, bağlantı kesme iptal edildi."
+            )
             return
         }
         Log.d(MainActivity.TAG, "[Direct] Bağlantı kesiliyor...")
         if (showStatus) connectionStatusDirect = "Bağlantı kesiliyor..."
         cleanUpDirectResources() // Tüm kaynakları temizleyen fonksiyonu çağır
         isDirectConnected = false // Bağlantı durumu state'ini false yap
-        if (showStatus) connectionStatusDirect = "Bağlantı kesildi (Direct)" // UI durum mesajını güncelle
+        if (showStatus) connectionStatusDirect =
+            "Bağlantı kesildi (Direct)" // UI durum mesajını güncelle
         directTelemetryState = DirectTelemetryState() // Telemetri verilerini sıfırla
         Log.d(MainActivity.TAG, "[Direct] Bağlantı kesildi state güncellendi.")
-        if (isConnecting == "Direct") isConnecting = null // Bağlanma işlemi sırasında kesildiyse durumu sıfırla
+        if (isConnecting == "Direct") isConnecting =
+            null // Bağlanma işlemi sırasında kesildiyse durumu sıfırla
     }
 
     // Proxy bağlantı ile ilgili tüm kaynakları temizler
     fun cleanUpProxyResources() {
         Log.d(MainActivity.TAG, "[Proxy] Kaynaklar temizleniyor...")
-        proxyJob?.cancel(); proxyJob = null; Log.d(MainActivity.TAG, "[Proxy] Proxy görevleri iptal edildi.")
+        proxyJob?.cancel(); proxyJob = null; Log.d(
+            MainActivity.TAG,
+            "[Proxy] Proxy görevleri iptal edildi."
+        )
         // Socket, Port, Connection kapatmadan önce null kontrolü
-        try { udpSocket?.close() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Proxy] UDP soketi kapatılırken hata", e)} finally { udpSocket = null }
-        try { proxyUsbPort?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Proxy] USB port kapatılırken hata", e)} finally { proxyUsbPort = null }
-        try { proxyUsbConnection?.close() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Proxy] USB connection kapatılırken hata", e)} finally { proxyUsbConnection = null }
+        try {
+            udpSocket?.close()
+        } catch (e: Exception) {
+            Log.e(MainActivity.TAG, "[Proxy] UDP soketi kapatılırken hata", e)
+        } finally {
+            udpSocket = null
+        }
+        try {
+            proxyUsbPort?.close()
+        } catch (e: IOException) {
+            Log.e(MainActivity.TAG, "[Proxy] USB port kapatılırken hata", e)
+        } finally {
+            proxyUsbPort = null
+        }
+        try {
+            proxyUsbConnection?.close()
+        } catch (e: Exception) {
+            Log.e(MainActivity.TAG, "[Proxy] USB connection kapatılırken hata", e)
+        } finally {
+            proxyUsbConnection = null
+        }
         disposablesProxy.clear() // RxJava aboneliklerini temizle
         // Drone ve Server'ı dispose/stop etmeden önce null kontrolü
-        try { drone?.dispose() } catch (e: Exception){ Log.e(MainActivity.TAG, "[Proxy] Drone dispose edilirken hata", e)} finally { drone = null }
-        try { mavsdkServer?.stop() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Proxy] MAVSDK Server durdurulurken hata", e)} finally { mavsdkServer = null }
+        try {
+            drone?.dispose()
+        } catch (e: Exception) {
+            Log.e(MainActivity.TAG, "[Proxy] Drone dispose edilirken hata", e)
+        } finally {
+            drone = null
+        }
+        try {
+            mavsdkServer?.stop()
+        } catch (e: Exception) {
+            Log.e(MainActivity.TAG, "[Proxy] MAVSDK Server durdurulurken hata", e)
+        } finally {
+            mavsdkServer = null
+        }
         Log.d(MainActivity.TAG, "[Proxy] Kaynaklar temizlendi.")
     }
 
@@ -395,121 +471,157 @@ fun DroneControllerApp(
     fun disconnectProxy(showStatus: Boolean = true) {
         // Zaten bağlı değilse veya kaynaklar temizse çık
         if (!isProxyConnected && proxyJob == null && drone == null && mavsdkServer == null && proxyUsbPort == null && udpSocket == null) {
-            Log.d(MainActivity.TAG, "[Proxy] Zaten bağlı değil veya temizlenmiş durumda, bağlantı kesme iptal edildi.")
+            Log.d(
+                MainActivity.TAG,
+                "[Proxy] Zaten bağlı değil veya temizlenmiş durumda, bağlantı kesme iptal edildi."
+            )
             return
         }
         Log.d(MainActivity.TAG, "[Proxy] Bağlantı kesiliyor...")
         if (showStatus) connectionStatusProxy = "Bağlantı kesiliyor..."
         cleanUpProxyResources() // Tüm kaynakları temizleyen fonksiyonu çağır
         isProxyConnected = false // Bağlantı durumu state'ini false yap
-        if (showStatus) connectionStatusProxy = "Bağlantı kesildi (Proxy)" // UI durum mesajını güncelle
+        if (showStatus) connectionStatusProxy =
+            "Bağlantı kesildi (Proxy)" // UI durum mesajını güncelle
         telemetryDataProxy = "Veri bekleniyor (Proxy)..." // Telemetri metnini sıfırla
         Log.d(MainActivity.TAG, "[Proxy] Bağlantı kesildi state güncellendi.")
-        if (isConnecting == "Proxy") isConnecting = null // Bağlanma işlemi sırasında kesildiyse durumu sıfırla
+        if (isConnecting == "Proxy") isConnecting =
+            null // Bağlanma işlemi sırasında kesildiyse durumu sıfırla
     }
 
     // --- UDP Proxy Coroutine ---
     // USB Seri Port <-> UDP Soket arasında veri köprüsü kurar.
     // MAVSDK Proxy bağlantısı için kullanılır.
-    fun startUdpProxy(currentUsbPort: UsbSerialPort, currentUdpSocket: DatagramSocket): Job {
-        return scope.launch(Dispatchers.IO + CoroutineName("udp-proxy")) {
-            Log.d(MainActivity.TAG, "[Proxy] UDP Proxy Coroutine başlatıldı.")
-            // Bu coroutine iki alt görevi paralel çalıştırır:
-            // 1. USB'den oku -> UDP'ye gönder
-            val usbToUdpJob = launch {
-                val buffer = ByteArray(4096) // Okuma buffer boyutu
-                // MAVSDK Server genellikle localhost:14540 üzerinde UDP dinler
-                val serverAddress = InetSocketAddress(InetAddress.getLoopbackAddress(), MainActivity.MAVSDK_SERVER_UDP_PORT)
-                Log.d(MainActivity.TAG, "[Proxy] USB -> UDP (${serverAddress}) görevi başlatıldı.")
-                while (isActive) { // Korutin iptal edilmediği sürece devam et
-                    try {
-                        // USB porttan veri oku. read metodu blocking'dir, timeout ile kullanılır.
-                        val len = currentUsbPort.read(buffer, 200) // 200ms timeout
+    // --- UDP Proxy Coroutine ---
+// USB Seri Port <-> UDP Soket arasında **ÇİFT YÖNLÜ** veri köprüsü kurar.
+    fun startUdpProxy(
+        usbPort: UsbSerialPort,
+        udpSocket: DatagramSocket,
+        targetAddress: InetAddress, // Hedef MAVSDK sunucu adresi (örn. localhost)
+        targetPort: Int,        // Hedef MAVSDK sunucu portu (örn. 14540)
+        bufferSize: Int = 1024  // Buffer boyutunu artırmak faydalı olabilir
+    ): Job {
+        // Ana proxy korutinini başlat
+        return CoroutineScope(Dispatchers.IO + CoroutineName("udp-proxy-main")).launch {
+            Log.d("UdpProxy", "Çift yönlü proxy başlatılıyor...")
+
+            // 1. USB -> UDP yönü için korutin
+            val usbToUdpJob = launch(CoroutineName("proxy-usb-to-udp")) {
+                val usbBuffer = ByteArray(bufferSize)
+                try {
+                    while (isActive) {
+                        // USB'den oku (blocking olabilir, ama IO dispatcher'da)
+                        // Daha sağlam olması için timeout ile okuma düşünülebilir: usbPort.read(usbBuffer, usbBuffer.size, READ_WAIT_MILLIS)
+                        val len = usbPort.read(usbBuffer, usbBuffer.size)
                         if (len > 0) {
-                            // Okunan veriyi UDP paketi olarak MAVSDK Server'a gönder
-                            val packet = DatagramPacket(buffer, len, serverAddress)
-                            currentUdpSocket.send(packet)
+                            val payload = usbBuffer.copyOf(len)
+                            // İsteğe bağlı: Detaylı loglama
+                            // val hexData = payload.joinToString(" ") { b -> b.toUByte().toString(16).padStart(2, '0') }
+                            // Log.d("UdpProxy", "USB -> UDP [$len byte]: $hexData")
+
+                            // Geçersiz MAVLink baytlarını kontrol et (isteğe bağlı, loglama için)
+                            if (payload.isNotEmpty() && payload[0].toUByte().toInt() != 0xFE && payload[0].toUByte().toInt() != 0xFD) {
+                                Log.w("UdpProxy", "USB'den gelen veri MAVLink ile başlamıyor (ilk bayt: 0x${payload[0].toUByte().toString(16)})")
+                            }
+
+                            // UDP'ye gönder (DatagramPacket hedef adresi belirtmeli)
+                            val packet = DatagramPacket(payload, payload.size, targetAddress, targetPort)
+                            try {
+                                udpSocket.send(packet)
+                            } catch (e: Exception) {
+                                Log.e("UdpProxy", "UDP gönderme hatası (USB->UDP): ${e.message}", e)
+                                // Hata devam ederse proxy'yi durdurmak gerekebilir.
+                                // delay(100) // Hata durumunda kısa bekleme
+                            }
                         } else if (len < 0) {
-                            // Genellikle bağlantı koptuğunda read -1 döndürür
-                            Log.w(MainActivity.TAG, "[Proxy] USB read -1 döndü, bağlantı kopmuş olabilir.")
-                            break // Döngüden çık
+                            // Okuma hatası (örn. port kapandı)
+                            Log.e("UdpProxy", "USB okuma hatası (len < 0). USB->UDP durduruluyor.")
+                            break // Döngüyü sonlandır
                         }
-                        // len == 0 ise timeout oldu, veri gelmedi, döngüye devam et.
-                    } catch (e: IOException) {
-                        // USB okuma veya UDP gönderme sırasında IO hatası (port kapanmış olabilir)
-                        if (isActive) Log.e(MainActivity.TAG, "[Proxy] USB okuma/UDP gönderme IO hatası: ${e.message}")
-                        break // Hata durumunda döngüden çık
-                    } catch (e: Exception) {
-                        // Beklenmedik diğer hatalar
-                        if (isActive) Log.e(MainActivity.TAG, "[Proxy] Beklenmedik USB->UDP hatası", e)
-                        break // Hata durumunda döngüden çık
+                        // else len == 0 -> Veri yok, döngüye devam et
+                        // CPU'yu yormamak için küçük bir gecikme eklenebilir (veri gelmediğinde)
+                        if (len == 0) delay(1) // Çok kısa bekleme
                     }
+                } catch (e: IOException) {
+                    if (isActive) {
+                        Log.e("UdpProxy", "USB okuma IO Hatası (USB->UDP): ${e.message}", e)
+                    } else {
+                        Log.d("UdpProxy", "USB okuma iptal edildi (USB->UDP).")
+                    }
+                } catch (e: Exception) {
+                    if (isActive) Log.e("UdpProxy", "Beklenmedik Hata (USB->UDP): ${e.message}", e)
+                } finally {
+                    Log.d("UdpProxy", "USB -> UDP yönü tamamlandı.")
+                    // Bir yön biterse diğerini de durdurmak için ana korutini iptal etmeyi düşünebiliriz
+                    // cancel() // Bu, diğer job'ın da bitmesini sağlar
                 }
-                Log.d(MainActivity.TAG, "[Proxy] USB -> UDP görevi durdu.")
             }
 
-            // 2. UDP'den al -> USB'ye yaz
-            val udpToUsbJob = launch {
-                val buffer = ByteArray(4096) // Okuma buffer boyutu
-                val packet = DatagramPacket(buffer, buffer.size) // UDP paketi
-                Log.d(MainActivity.TAG, "[Proxy] UDP (${currentUdpSocket.localPort}) -> USB görevi başlatıldı.")
-                while (isActive) { // Korutin iptal edilmediği sürece devam et
-                    try {
-                        // UDP soketinden paket al. receive metodu blocking'dir.
-                        currentUdpSocket.receive(packet)
-                        // Paket alındıysa ve korutin hala aktifse
-                        if (packet.length > 0 && isActive) {
-                            // Gelen veriyi USB porta yaz
-                            try {
-                                // write metodu blocking'dir.
-                                currentUsbPort.write(packet.data, packet.length)
-                            } catch (writeEx: IOException) {
-                                // USB yazma hatası (port kapanmış olabilir)
-                                if(isActive) Log.e(MainActivity.TAG, "[Proxy] USB yazma hatası: ${writeEx.message}")
-                                break // Döngüden çık
+            // 2. UDP -> USB yönü için korutin
+            val udpToUsbJob = launch(CoroutineName("proxy-udp-to-usb")) {
+                val udpBuffer = ByteArray(bufferSize)
+                val packet = DatagramPacket(udpBuffer, udpBuffer.size)
+                try {
+                    while (isActive) {
+                        try {
+                            // UDP soketinden veri al (blocking)
+                            udpSocket.receive(packet)
+
+                            val len = packet.length
+                            if (len > 0) {
+                                val payload = packet.data.copyOf(len) // Alınan veriyi kopyala
+                                // İsteğe bağlı: Detaylı loglama
+                                // val hexData = payload.joinToString(" ") { b -> b.toUByte().toString(16).padStart(2, '0') }
+                                // Log.d("UdpProxy", "UDP -> USB [$len byte] from ${packet.socketAddress}: $hexData")
+
+                                // Alınan veriyi USB porta yaz
+                                try {
+                                    // Timeout ile yazma daha güvenli olabilir: usbPort.write(payload, WRITE_WAIT_MILLIS)
+                                    usbPort.write(payload, 500) // 500ms timeout ile yazma
+                                } catch(writeError: IOException) {
+                                    Log.e("UdpProxy", "USB yazma hatası (UDP->USB): ${writeError.message}")
+                                    break // Yazma hatasında bu yönü durdur
+                                }
+                            }
+                        } catch (e: IOException) {
+                            // UDP receive sırasında IO hatası (örn. soket kapandı)
+                            if (isActive) {
+                                Log.e("UdpProxy", "UDP alma IO Hatası (UDP->USB): ${e.message}", e)
+                                break // Soket hatasında bu yönü durdur
+                            } else {
+                                Log.d("UdpProxy", "UDP alma iptal edildi (UDP->USB).")
                             }
                         }
-                    } catch (e: IOException) {
-                        // UDP alma hatası (soket kapatılmış olabilir, örneğin bağlantı kesildiğinde)
-                        if (isActive) Log.w(MainActivity.TAG, "[Proxy] UDP alma hatası (muhtemelen soket kapatıldı): ${e.message}")
-                        break // Döngüden çık
-                    } catch (e: Exception) {
-                        // Beklenmedik diğer hatalar
-                        if (isActive) Log.e(MainActivity.TAG, "[Proxy] Beklenmedik UDP->USB hatası", e)
-                        break // Hata durumunda döngüden çık
                     }
+                } catch (e: Exception) {
+                    if (isActive) Log.e("UdpProxy", "Beklenmedik Hata (UDP->USB): ${e.message}", e)
+                } finally {
+                    Log.d("UdpProxy", "UDP -> USB yönü tamamlandı.")
+                    // Bir yön biterse diğerini de durdurmak için ana korutini iptal etmeyi düşünebiliriz
+                    // cancel() // Bu, diğer job'ın da bitmesini sağlar
                 }
-                Log.d(MainActivity.TAG, "[Proxy] UDP -> USB görevi durdu.")
             }
 
-            // İki alt görevin de bitmesini bekle veya birisi hata ile biterse diğerini iptal et
+            // İki yönlü iş bitene kadar bekle (veya ana korutin iptal edilene kadar)
             try {
+                // İki job'ın da tamamlanmasını bekle. joinAll iptal edilirse exception fırlatmaz.
                 joinAll(usbToUdpJob, udpToUsbJob)
             } finally {
-                Log.d(MainActivity.TAG, "[Proxy] Tüm proxy görevleri tamamlandı/iptal edildi.")
-                // Eğer proxy görevleri bittiğinde ana proxy korutini hala aktifse (yani dışarıdan iptal edilmediyse),
-                // bu, alt görevlerden birinin hata nedeniyle durduğunu gösterir.
-                if (isActive) {
-                    // Ana thread'e geçip bağlantıyı kesme işlemini yap.
-                    withContext(Dispatchers.Main + NonCancellable) { // Güvenli geçiş ve iptal edilemez blok
-                        if(isProxyConnected || isConnecting == "Proxy") { // Hala bağlı/bağlanmaya çalışıyorsa
-                            // Bağlantı hatası olduğunu kullanıcıya bildir
-                            showError("Proxy iletişim hatası veya bağlantı koptu.", "Proxy")
-                            // Bağlantıyı temizle. disconnectProxy, isConnecting'i de null yapar.
-                            disconnectProxy(showStatus = false) // Hata mesajını zaten gösterdik
-                        } else {
-                            // Bağlantı kesme işlemi sırasında doğal olarak buraya düşülmüş olabilir
-                            Log.d(TAG, "[Proxy] Proxy görevleri bitti, ancak bağlantı durumu zaten kesilmişti.")
-                        }
-                    }
-                } else {
-                    // Korutin dışarıdan (örn. disconnectProxy çağrısıyla) iptal edildi.
-                    Log.d(TAG, "[Proxy] Proxy görevleri dışarıdan iptal edildi.")
-                }
+                Log.d("UdpProxy", "Çift yönlü proxy tamamlandı veya iptal edildi.")
+                // Soketi ve portu kapatmak ana bağlantı fonksiyonunun (connectProxy)
+                // catch veya finally bloğunun sorumluluğudur. Proxy job bittiğinde
+                // otomatik kapanmazlar.
             }
-            Log.d(MainActivity.TAG, "[Proxy] UDP Proxy Coroutine tamamlandı.")
-        }
+        } // Ana proxy korutini sonu
     }
+
+
+// `connectProxy` fonksiyonunda `startUdpProxy` çağrısını şu şekilde güncelleyin:
+// ...
+// 5. USB <-> UDP proxy'yi BAŞLAT
+// Çift yönlü proxy fonksiyonunu çağırıyoruz.
+// ...
+
 
     // --- MAVSDK Telemetry Listener ---
     // MAVSDK System objesi üzerinden gelen telemetri verilerini dinler ve UI state'lerini günceller.
@@ -527,7 +639,10 @@ fun DroneControllerApp(
                 .subscribe(
                     { position ->
                         // Gelen konum verisi ile telemetri stringini güncelle
-                        telemetryDataProxy = "Lat: ${position.latitudeDeg.format()}, Lon: ${position.longitudeDeg.format()}, Alt: ${position.relativeAltitudeM.format(2)} m"
+                        telemetryDataProxy =
+                            "Lat: ${position.latitudeDeg.format()}, Lon: ${position.longitudeDeg.format()}, Alt: ${
+                                position.relativeAltitudeM.format(2)
+                            } m"
                     },
                     { error ->
                         // Hata durumunu logla
@@ -543,13 +658,32 @@ fun DroneControllerApp(
                 .observeOn(AndroidSchedulers.mainThread())
                 .subscribe(
                     { armed ->
-                        Log.d(MainActivity.TAG,"[Proxy] Arm Durumu: ${if(armed) "Armed" else "Disarmed"}")
+                        Log.d(
+                            MainActivity.TAG,
+                            "[Proxy] Arm Durumu: ${if (armed) "Armed" else "Disarmed"}"
+                        )
                         // İsterseniz bu durumu UI'da Proxy telemetri kısmında gösterebilirsiniz.
                     },
                     { error ->
                         Log.w(MainActivity.TAG, "[Proxy] Arm durumu alınamadı: ${error.message}")
                     }
                 )
+        )
+
+        disposablesProxy.add(
+            droneSystem.telemetry.altitude
+                .subscribeOn(Schedulers.io())
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(
+                    { imu ->
+                        println("imu = " +imu)
+
+                    },
+                    { error ->
+                        Log.w(MainActivity.TAG, "[Proxy] Imu verisi alınamadı: ${error.message}")
+                    }
+                )
+
         )
 
         // Batarya Durumu aboneliği
@@ -560,7 +694,8 @@ fun DroneControllerApp(
                 .subscribe(
                     { battery ->
                         // Batarya yüzdesini al, null ise "N/A" göster
-                        val batteryText = battery.remainingPercent?.let { "${(it * 100).toInt()}%" } ?: "N/A"
+                        val batteryText =
+                            battery.remainingPercent?.let { "${(it * 100).toInt()}%" } ?: "N/A"
                         Log.d(MainActivity.TAG, "[Proxy] Pil: $batteryText")
                         // İsterseniz bu durumu UI'da Proxy telemetri kısmında gösterebilirsiniz.
                     },
@@ -606,7 +741,8 @@ fun DroneControllerApp(
                     // MavMode enum'unu kullanarak değeri string'e çevirmeyi deniyoruz.
                     val currentMode = try {
                         // fromValue metodunu kullanarak raw integer değerden enum'a çevir
-                        MavMode.valueOf(p.customMode().toString())?.name ?: "CUSTOM(${p.customMode()})"
+                        MavMode.valueOf(p.customMode().toString())?.name
+                            ?: "CUSTOM(${p.customMode()})"
                     } catch (e: Exception) {
                         // Eğer fromValue hata verirse (örn. customMode enum'da yoksa) ham değeri göster
                         "CUSTOM(${p.customMode()})"
@@ -627,6 +763,7 @@ fun DroneControllerApp(
                         mavlinkVersion = p.mavlinkVersion().toInt() // Byte'ı Int'e çevir
                     )
                 }
+
                 is GpsRawInt -> newState.copy(
                     // GpsFixType enum'unu raw integer değerden al ve ordinal değerini kullan (0:NoFix, 1:NoGPS, 2:2D, 3:3D, ...)
                     fixType = p.fixType().value(),
@@ -636,6 +773,7 @@ fun DroneControllerApp(
                     // COG (Course Over Ground) değeri 65535 ise geçersizdir (N/A)
                     heading = if (p.cog() == 65535) null else p.cog() / 100.0 // Santidereceden dereceye çevir
                 )
+
                 is GlobalPositionInt -> newState.copy(
                     latitude = p.lat() / 1E7, // int'ten double'a
                     longitude = p.lon() / 1E7, // int'ten double'a
@@ -644,34 +782,44 @@ fun DroneControllerApp(
                     // Heading değeri 65535 ise geçersizdir (N/A)
                     heading = if (p.hdg() == 65535) null else p.hdg() / 100.0 // Santidereceden dereceye çevir
                 )
+
                 is VfrHud -> newState.copy(
                     airSpeed = p.airspeed().toDouble(), // Float'tan Double'a
                     groundSpeed = p.groundspeed().toDouble(), // Float'tan Double'a
                     throttle = p.throttle().toInt(), // UShort'tan Int'e (Yüzde değeri)
                     climbRate = p.climb().toDouble() // Float'tan Double'a
                 )
+
                 is Attitude -> newState.copy(
                     // Radyan cinsinden açıları dereceye çevir (Float'tan Double'a)
                     roll = Math.toDegrees(p.roll().toDouble()),
                     pitch = Math.toDegrees(p.pitch().toDouble()),
-                    yaw = Math.toDegrees(p.yaw().toDouble()) // Genellikle manyetik yön değil, aracın kendi eksenindeki dönüşü
+                    yaw = Math.toDegrees(
+                        p.yaw().toDouble()
+                    ) // Genellikle manyetik yön değil, aracın kendi eksenindeki dönüşü
                 )
+
                 is SysStatus -> newState.copy(
                     batteryVoltage = p.voltageBattery() / 1000.0, // mV'tan V'a (UShort'tan Double'a)
                     // Akım -1 ise geçersizdir (null yap)
-                    batteryCurrent = p.currentBattery().let { if(it < 0) null else it / 100.0 }, // cA'dan A'ya (Short'tan Double'a)
+                    batteryCurrent = p.currentBattery()
+                        .let { if (it < 0) null else it / 100.0 }, // cA'dan A'ya (Short'tan Double'a)
                     // Kalan batarya -1 ise geçersizdir (null yap)
-                    batteryRemaining = p.batteryRemaining().let { if(it < 0) null else it?.toInt() } // Byte'tan Int'e
+                    batteryRemaining = p.batteryRemaining()
+                        .let { if (it < 0) null else it?.toInt() } // Byte'tan Int'e
                 )
+
                 is BatteryStatus -> {
                     // BatteryStatus mesajı birden fazla batarya için bilgi içerebilir.
                     // Genellikle id=0 ana bataryayı temsil eder. Sadece id=0 olanı işleyelim.
                     if (p.id().toInt() == 0) { // UByte'ı Int'e çevir
                         newState.copy(
                             // Akım -1 ise geçersizdir (null yap)
-                            batteryCurrent = p.currentBattery().let { if(it < 0) null else it / 100.0 }, // cA'dan A'ya (Short'tan Double'a)
+                            batteryCurrent = p.currentBattery()
+                                .let { if (it < 0) null else it / 100.0 }, // cA'dan A'ya (Short'tan Double'a)
                             // Kalan batarya -1 ise geçersizdir (null yap)
-                            batteryRemaining = p.batteryRemaining().let { if(it < 0) null else it?.toInt() } // Byte'tan Int'e
+                            batteryRemaining = p.batteryRemaining()
+                                .let { if (it < 0) null else it?.toInt() } // Byte'tan Int'e
                             // Not: BatteryStatus'ta voltaj genellikle liste halindedir (p.voltages()),
                             // Tekil voltaj için SysStatus daha güvenilir olabilir veya voltages[0] kullanılabilir.
                             // batteryVoltage = p.voltages().firstOrNull()?.let { if(it == UShort.MAX_VALUE.toUShort()) null else it.toDouble() / 1000.0 } // mV'tan V'a
@@ -680,12 +828,19 @@ fun DroneControllerApp(
                         newState // Diğer bataryaları şimdilik göz ardı et
                     }
                 }
+
                 is Statustext -> {
                     // Severity enum'unu raw integer değerden al ve formatla
-                    val severity = p.severity().value()                    // p.text() ByteArray döndürür, String'e çevirirken null terminator'dan sonrasını kesmek gerekebilir.
-                    val textMessage = try { String(p.text().takeWhile { it.code.toByte() != 0.toByte() }.toByteArray()) } catch (e: Exception) { "Decode Error" }
+                    val severity = p.severity()
+                        .value()                    // p.text() ByteArray döndürür, String'e çevirirken null terminator'dan sonrasını kesmek gerekebilir.
+                    val textMessage = try {
+                        String(p.text().takeWhile { it.code.toByte() != 0.toByte() }.toByteArray())
+                    } catch (e: Exception) {
+                        "Decode Error"
+                    }
                     newState.copy(statusText = "[$severity] $textMessage")
                 }
+
                 else -> {
                     // Bilinmeyen veya işlenmeyen mesaj türü için mevcut durumu koru
                     // Hangi mesajların işlenmediğini görmek için loglama ekleyebilirsiniz:
@@ -745,7 +900,10 @@ fun DroneControllerApp(
     // --- MAVLink Parser Coroutine (Direct Connection) ---
     // SerialInputOutputManager'dan gelen ham baytları (kanal ve pipe üzerinden) MavlinkConnection ile okuyup ayrıştırır.
     // Aynı zamanda MAVLink komutlarını göndermek için bir OutputStream kullanır.
-    fun startDirectMavlinkParser(inputStream: InputStream, outputStream: OutputStream? = null): Job {
+    fun startDirectMavlinkParser(
+        inputStream: InputStream,
+        outputStream: OutputStream? = null
+    ): Job {
         return scope.launch(Dispatchers.IO + CoroutineName(name = "mavlink-parser")) {
             Log.d(MainActivity.TAG, "[Direct] MAVLink Parser Coroutine başlatıldı.")
 
@@ -755,8 +913,11 @@ fun DroneControllerApp(
                 // InputStream PipedInputStream olmalı, OutputStream doğrudan porta yazan implementasyon olmalı.
                 connection = MavlinkConnection.builder(inputStream, outputStream)
                     // Desteklenecek MAVLink dialect'lerini ekleyin. Common genellikle zorunludur.
-                    .dialect(MavAutopilot.MAV_AUTOPILOT_GENERIC,  StandardDialect())
-                    .dialect(MavAutopilot.MAV_AUTOPILOT_ARDUPILOTMEGA,  ArdupilotmegaDialect())                    // Eğer ArduPilot kullanıyorsanız ArduPilotmega dialect'i ekleyin.
+                    .dialect(MavAutopilot.MAV_AUTOPILOT_GENERIC, StandardDialect())
+                    .dialect(
+                        MavAutopilot.MAV_AUTOPILOT_ARDUPILOTMEGA,
+                        ArdupilotmegaDialect()
+                    )                    // Eğer ArduPilot kullanıyorsanız ArduPilotmega dialect'i ekleyin.
                     // .dialect(MavlinkDialect.ARDUPILOTMEGA)
                     // Eğer PX4 kullanıyorsanız veya başka dialectler gerekiyorsa ekleyin.
                     // .dialect(...)
@@ -766,7 +927,13 @@ fun DroneControllerApp(
                 // MavlinkConnection oluşturulurken hata oluşursa
                 Log.e(MainActivity.TAG, "[Direct Parser] Failed to build MavlinkConnection", e)
                 withContext(Dispatchers.Main + NonCancellable) {
-                    showError("Parser başlatma hatası: MavlinkConnection oluşturulamadı. ${e.message?.take(100)}", "Direct")
+                    showError(
+                        "Parser başlatma hatası: MavlinkConnection oluşturulamadı. ${
+                            e.message?.take(
+                                100
+                            )
+                        }", "Direct"
+                    )
                 }
                 // Bu korutini sonlandır
                 return@launch
@@ -786,7 +953,10 @@ fun DroneControllerApp(
                         // Log.d(TAG, "[Direct Parser] Processed message: ${message.payload::class.java.simpleName}")
                     } else {
                         // next() null döndürürse genellikle stream'in sonuna ulaşıldığı veya kapatıldığı anlamına gelir.
-                        Log.d(TAG, "[Direct Parser] connection.next() returned null. Stream ended or closed.")
+                        Log.d(
+                            TAG,
+                            "[Direct Parser] connection.next() returned null. Stream ended or closed."
+                        )
                         break // Mesaj okuma döngüsünden çık
                     }
                 }
@@ -796,7 +966,10 @@ fun DroneControllerApp(
                 if (isActive) { // Eğer korutin hata oluştuğunda hala aktifse (dışarıdan iptal edilmediyse)
                     Log.e(TAG, "[Direct Parser] IO error reading MAVLink stream: ${e.message}", e)
                     withContext(Dispatchers.Main + NonCancellable) { // UI thread'ine güvenli geçiş
-                        showError("Bağlantı hatası (Stream Okuma): ${e.message?.take(100)}", "Direct")
+                        showError(
+                            "Bağlantı hatası (Stream Okuma): ${e.message?.take(100)}",
+                            "Direct"
+                        )
                         disconnectDirectUsb() // Hata durumunda bağlantıyı kes ve kaynakları temizle
                     }
                 } else {
@@ -818,10 +991,18 @@ fun DroneControllerApp(
                 // Parser korutini tamamlandığında (başarılı, hata veya iptal ile) burası çalışır.
                 Log.d(TAG, "[Direct Parser] Parser Job finally block.")
                 // InputStream (pipe input stream) bu korutin bittiğinde kapatılmalıdır.
-                try { inputStream.close() } catch (e: IOException) { Log.e(TAG, "[Direct Parser] Error closing InputStream in finally", e) }
+                try {
+                    inputStream.close()
+                } catch (e: IOException) {
+                    Log.e(TAG, "[Direct Parser] Error closing InputStream in finally", e)
+                }
                 // OutputStream (komut gönderme stream'i) de burada kapatılabilir, ancak genellikle
                 // bağlı olduğu port veya pipe'ın diğer ucu başka yerde kapatılır. Yine de double close zararlı değildir.
-                try { outputStream?.close() } catch (e: IOException) { Log.e(TAG, "[Direct Parser] Error closing OutputStream in finally", e) }
+                try {
+                    outputStream?.close()
+                } catch (e: IOException) {
+                    Log.e(TAG, "[Direct Parser] Error closing OutputStream in finally", e)
+                }
 
                 Log.d(MainActivity.TAG, "[Direct Parser] MAVLink Parser Coroutine tamamlandı.")
             }
@@ -834,24 +1015,17 @@ fun DroneControllerApp(
     // Aldığı baytları directDataChannel'a gönderir.
     class DirectUsbSerialListener : SerialInputOutputManager.Listener {
         // Seri porttan yeni veri geldiğinde çağrılır
+        val mavlinkBuffer = ByteArrayOutputStream()
+
         override fun onNewData(data: ByteArray) {
-            // Gelen veriyi directDataChannel'a gönder.
-            // Bu işlem bloklayıcı olabilir (eğer kanal doluysa), bu yüzden bir korutin içinde başlatılır.
-            scope.launch(Dispatchers.IO) { // IO thread'inde korutin başlat
-                try {
-                    // Kanal açık ve aktifse veriyi gönder
-                    if (!directDataChannel.isClosedForSend) {
-                        directDataChannel.send(data) // Bayt dizisini kanala gönder
-                    } else {
-                        // Kanal kapatılmışsa gönderme logu
-                        Log.w(MainActivity.TAG, "[Direct Listener] Attempted to send data, but channel is closed.")
-                    }
-                } catch (e: ClosedSendChannelException) {
-                    // Kanal kapatılmış (disconnect DirectUsb çağrıldığında parser ve kanal kapatılır), beklenen durum.
-                    Log.w(MainActivity.TAG, "[Direct Listener] Channel closed while trying to send data.")
-                } catch (e: Exception) {
-                    // Diğer olası hatalar (örn. kanal senkronizasyon sorunları vb.)
-                    Log.e(MainActivity.TAG, "[Direct Listener] Error sending data to channel", e)
+            for (byte in data) {
+                if (mavlinkBuffer.size() == 0 && byte.toInt() != 0xFE && byte.toInt() != 0xFD) {
+                    continue  // MAVLink başlangıç baytını bekleyin
+                }
+                mavlinkBuffer.write(byte.toInt())
+
+                if (mavlinkBuffer.size() > 280) {  // MAVLink max paket boyutu
+                    mavlinkBuffer.reset()
                 }
             }
         }
@@ -869,123 +1043,240 @@ fun DroneControllerApp(
     // --- Bağlantı Fonksiyonları ---
 
     // 1. UDP Proxy ile Bağlanma (MAVSDK Server + USB/UDP Bridge)
+// --- Bağlantı Fonksiyonları ---
+// 1. UDP Proxy ile Bağlanma (MAVSDK Server + USB/UDP Bridge)
+// --- Bağlantı Fonksiyonları ---
+// 1. UDP Proxy ile Bağlanma (MAVSDK Server + USB/UDP Bridge)
     @SuppressLint("ServiceCast")
     fun connectProxy(device: UsbDevice) {
-        // Zaten başka bir bağlantı işlemi devam ediyorsa yeni bir tane başlatma
         if (isConnecting != null) {
-            showError("Başka bir bağlantı işlemi sürüyor.", "Proxy");
+            showError("Başka bir bağlantı işlemi sürüyor.", "Proxy")
             return
         }
-        isConnecting = "Proxy" // Bağlantı durumunu güncelle
-        // Varsa Direct bağlantıyı kes (ikisi aynı anda aktif olmamalı)
+        isConnecting = "Proxy"
         disconnectDirectUsb(showStatus = false)
-        // UI durum mesajlarını güncelle
-        connectionStatusProxy = "Bağlanılıyor (Proxy)..."; telemetryDataProxy = "..."
-        selectedUsbDevice = device // Seçilen cihazı kaydet
-
-        // Bağlantı işlemini bir korutin içinde ve IO thread'inde başlatıyoruz
+        connectionStatusProxy = "Bağlanılıyor (Proxy)..."
+        telemetryDataProxy = "..."
+        selectedUsbDevice = device
         scope.launch(Dispatchers.IO) {
-            // Try bloğu dışında null olarak başlatılan kaynaklar, hata oluşursa temizlenmeyi kolaylaştırır.
             var openedConnection: UsbDeviceConnection? = null
-            var openedPort: UsbSerialPort? = null // Nullable local var
+            var openedPort: UsbSerialPort? = null
             var openedSocket: DatagramSocket? = null
             var startedServer: MavsdkServer? = null
             var connectedDrone: System? = null
-            var startedProxyJob: Job? = null // Proxy köprü korutininin referansı
+            var startedProxyJob: Job? = null
+            var serverJob: Job? = null // Sunucu korutini için Job referansı
+
+            Log.d(TAG, "[Proxy Connect] Bağlantı süreci başlatılıyor...") // ++ EKLENDİ: Genel başlangıç logu
 
             try {
-                // 1. USB Aygıtı Aç ve Seri Portu Yapılandır
+                // 1. USB bağlantısını aç ve portu yapılandır
+                Log.d(TAG, "[Proxy Connect] Adım 1: USB Bağlantısı Açılıyor...") // ++ EKLENDİ
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
                 openedConnection = usbManager?.openDevice(device)
-                    ?: throw IOException("USB cihaz bağlantısı açılamadı.") // Bağlantı null dönerse hata fırlat
+                    ?: throw IOException("USB cihaz bağlantısı açılamadı.")
+                val drivers = listOf(
+                    CdcAcmSerialDriver(device),
+                    Ch34xSerialDriver(device),
+                    Cp21xxSerialDriver(device),
+                    FtdiSerialDriver(device)
+                )
+                val driver = drivers.firstOrNull { it.ports.isNotEmpty() }
+                    ?: throw IOException("USB seri sürücüsü bulunamadı.")
+                openedPort = driver.ports.firstOrNull()
+                    ?: throw IOException("USB seri port bulunamadı.")
+                openedPort.open(openedConnection)
+                openedPort.setParameters(
+                    MainActivity.DEFAULT_BAUD_RATE,
+                    UsbSerialPort.DATABITS_8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE
+                )
+                Log.d(TAG, "[Proxy Connect] Adım 1 Tamamlandı: USB Port açıldı ve yapılandırıldı.") // ++ EKLENDİ
 
-                val driver = UsbSerialProber.getDefaultProber().probeDevice(device) // Cihaz için uygun sürücüyü bul
-                    ?: throw IOException("USB seri sürücüsü bulunamadı.") // Sürücü bulunamazsa hata fırlat
+                // 2. MAVSDK Server'ı BAŞLAT (Ayrı bir korutinde)
+                Log.d(TAG, "[Proxy Connect] Adım 2: MAVSDK Server Başlatılıyor...") // ++ EKLENDİ
+                startedServer = MavsdkServer()
+                serverJob = scope.launch(Dispatchers.IO + CoroutineName("mavsdk-server-runner")) {
+                    try {
+                        Log.i(TAG, "[Proxy Server Coroutine] MAVSDK Server çalıştırılıyor (run)...") // ++ GÜNCELLENDİ: Info seviyesi log
+                        startedServer.run() // Bu potansiyel olarak bloklayıcı olabilir
+                        Log.i(TAG, "[Proxy Server Coroutine] MAVSDK Server çalışması bitti (normalde bitmemeli).") // ++ GÜNCELLENDİ: Info seviyesi log
+                    } catch (e: Exception) {
+                        // ++ EKLENDİ: Sunucu çalışma hatası için detaylı log
+                        Log.e(TAG, "[Proxy Server Coroutine] MAVSDK Server run() sırasında KRİTİK HATA: ${e.message}", e)
+                        // Ana bağlantı sürecini de iptal etmeye çalışabiliriz
+                        this@launch.cancel(CancellationException("MAVSDK Server run() hatası: ${e.message}", e))
+                    } finally {
+                        Log.i(TAG, "[Proxy Server Coroutine] MAVSDK Server korutini sonlanıyor.") // ++ EKLENDİ: Finally logu
+                    }
+                }
+                Log.d(TAG, "[Proxy Connect] Adım 2 Tamamlandı: MAVSDK Server başlatma korutini (serverJob) başlatıldı.") // ++ EKLENDİ
 
-                openedPort = driver.ports.firstOrNull() // İlk kullanılabilir portu al
-                    ?: throw IOException("USB seri port bulunamadı.") // Port bulunamazsa hata fırlat
+                // 3. MAVSDK Server'ın başlaması için kısa bir süre bekle
+                val serverWaitDelay = 3000L // ++ GÜNCELLENDİ: Bekleme süresi 3 saniyeye çıkarıldı
+                Log.d(TAG, "[Proxy Connect] Adım 3: MAVSDK Server'ın başlaması için ${serverWaitDelay}ms bekleniyor...") // ++ EKLENDİ
+                delay(serverWaitDelay)
+                // ++ EKLENDİ: Sunucu korutininin hala aktif olup olmadığını kontrol et
+                if (serverJob?.isActive != true) {
+                    throw IOException("MAVSDK Server korutini ${serverWaitDelay}ms bekleme sonrası aktif değil. Başlatma hatası olabilir.")
+                }
+                Log.d(TAG, "[Proxy Connect] Adım 3 Tamamlandı: MAVSDK Server için beklendi, korutin aktif.") // ++ EKLENDİ
 
-                openedPort.open(openedConnection) // Portu bağlantı üzerinden aç
-                openedPort.setParameters(MainActivity.DEFAULT_BAUD_RATE, UsbSerialPort.DATABITS_8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE) // Port parametrelerini ayarla (baud rate, data bits, stop bits, parity)
-                Log.d(TAG, "[Proxy] USB Port açıldı ve yapılandırıldı (${MainActivity.DEFAULT_BAUD_RATE} baud).")
-
-                // 2. UDP Soketi Oluştur
-                // MAVSDK Server ile iletişim kurmak için bir UDP soketi oluşturulur.
-                openedSocket = DatagramSocket() // Rastgele boş bir yerel portta soket oluşturur
-                // Soketi MAVSDK Server'ın beklediği adrese (localhost) ve porta bağlar (sadece göndermek için connect kullanılır).
-                openedSocket.connect(InetAddress.getLoopbackAddress(), MainActivity.MAVSDK_SERVER_UDP_PORT)
-                Log.d(TAG, "[Proxy] UDP Soketi oluşturuldu ve ${MainActivity.MAVSDK_SERVER_UDP_PORT} portuna bağlandı.")
-
-                // 3. USB <-> UDP Proxy Coroutine'i Başlat
-                // Bu coroutine, USB seri portu ile UDP soketi arasında iki yönlü veri aktarımını yönetir.
-                startedProxyJob = startUdpProxy(openedPort, openedSocket) // Proxy görevini başlat ve referansını al
-                Log.d(TAG, "[Proxy] UDP Proxy görevi başlatıldı.")
-
-                // 4. MAVSDK Server'ı Başlat
-                // MAVSDK Server, proxy üzerinden gelen MAVLink verisini işleyecek.
-                startedServer = MavsdkServer() // MAVSDK Server objesini oluştur
-                startedServer.run() // Server'ı arka planda çalıştır (bloklamaz)
-                Log.d(TAG, "[Proxy] MAVSDK Server başlatıldı.")
-
-                // 5. MAVSDK System'e Bağlan
-                // MAVSDK System objesi, Server ile iletişim kurarak drone'u temsil eder.
-                // Server'ın ve drone'un tamamen hazır olması için biraz beklemek gerekebilir.
-                // Gerçek uygulamada burada MAVSDK'nın bağlantı durumu dinlenmelidir.
-                delay(5000) // Örnek amaçlı 5 saniye bekleme (İyileştirilmeli!)
-
-                // MAVSDK System'i, MAVSDK Server'ın localhost'taki UDP portuna bağla.
-                connectedDrone = System("127.0.0.1", MainActivity.MAVSDK_SERVER_UDP_PORT)
-                Log.d(TAG, "[Proxy] MAVSDK System (Drone) objesi oluşturuldu.")
-
-                // MAVSDK System üzerinden gelen telemetri verilerini dinlemek için abonelikleri ayarla.
-                setupTelemetryListeners(connectedDrone) // RxJava aboneliklerini kur
-                Log.d(TAG, "[Proxy] Telemetri dinleyicileri ayarlandı.")
-
-                // Bağlantı aşamaları başarılı olduysa UI state'leri Main thread'de güncelle
-                withContext(Dispatchers.Main) {
-                    proxyUsbConnection = openedConnection // Bağlantı referansını kaydet
-                    proxyUsbPort = openedPort // Port referansını kaydet
-                    udpSocket = openedSocket // Soket referansını kaydet
-                    mavsdkServer = startedServer // Server referansını kaydet
-                    drone = connectedDrone // Drone referansını kaydet
-                    proxyJob = startedProxyJob // Proxy görevi referansını kaydet
-
-                    connectionStatusProxy = "Bağlandı: ${device.deviceName} (${MainActivity.DEFAULT_BAUD_RATE}) via MAVSDK Proxy" // UI durum mesajı
-                    isProxyConnected = true // Bağlantı durumu state'ini true yap
-                    isConnecting = null // Bağlantı işlemi tamamlandı
-
-                    Log.d(TAG, "[Proxy] Bağlantı başarılı, state güncellendi.")
+                // 4. UDP soketini oluştur ve BAĞLAN
+                Log.d(TAG, "[Proxy Connect] Adım 4: UDP Soketi Oluşturuluyor ve Bağlanıyor (localhost:${MainActivity.MAVSDK_SERVER_UDP_PORT})...") // ++ EKLENDİ
+                openedSocket = DatagramSocket() // Önce soketi oluştur
+                try {
+                    val targetAddress = InetAddress.getLoopbackAddress()
+                    val targetPort = MainActivity.MAVSDK_SERVER_UDP_PORT
+                    Log.d(TAG, "[Proxy Connect] UDP connect() çağrılıyor: ${targetAddress}:${targetPort}") // ++ EKLENDİ
+                    openedSocket.connect(targetAddress, targetPort)
+                    Log.i(TAG, "[Proxy Connect] Adım 4 Başarılı: UDP soketi MAVSDK Server adresine bağlandı.") // ++ GÜNCELLENDİ: Başarı logu
+                } catch (socketError: Exception) {
+                    Log.e(TAG, "[Proxy Connect] Adım 4 KRİTİK HATA: UDP soketini bağlarken HATA: ${socketError.message}", socketError) // ++ GÜNCELLENDİ: Hata logu
+                    serverJob?.cancel() // Sunucu korutinini de iptal etmeyi dene
+                    throw IOException("UDP soketi MAVSDK Server'a bağlanamadı (${socketError.message}). Sunucu çalışmıyor veya port (${MainActivity.MAVSDK_SERVER_UDP_PORT}) meşgul olabilir.", socketError)
                 }
 
-            } catch (e: Exception) {
-                // Bağlantı aşamalarından herhangi birinde hata oluşursa
-                Log.e(TAG, "[Proxy] Bağlantı Hatası: ${e.message}", e)
-                // Hata oluşursa, o ana kadar başarılı olan tüm kaynakları temizle
-                try { startedProxyJob?.cancel() } catch (e: Exception) { Log.e(TAG, "[Proxy] Error cancelling proxyJob on error", e)} // Proxy görevini iptal et
-                try { startedServer?.stop() } catch (e: Exception) { Log.e(TAG, "[Proxy] Error stopping server on error", e)} // MAVSDK Server'ı durdur
-                try { connectedDrone?.dispose() } catch (e: Exception){ Log.e(TAG, "[Proxy] Error disposing drone on error", e)} // Drone objesini temizle
-                try { openedSocket?.close() } catch (e: Exception) { Log.e(TAG, "[Proxy] Error closing socket on error", e)} // UDP soketini kapat
-                try { openedPort?.close() } catch (e: IOException) { Log.e(TAG, "[Proxy] Error closing port on error", e) } // USB portunu kapat
-                try { openedConnection?.close() } catch (e: Exception) { Log.e(TAG, "[Proxy] Error closing connection on error", e)} // USB bağlantısını kapat
+            // ++ YENİ EKLENDİ: UDP Soket bağlandıktan sonra kısa bir bekleme ++
+            val postSocketConnectDelay = 500L // Yarım saniye bekleme
+            Log.d(TAG, "[Proxy Connect] UDP soket bağlandı, proxy başlatılmadan önce ${postSocketConnectDelay}ms bekleniyor...")
+            delay(postSocketConnectDelay)
+            // ++ YENİ EKLENDİ SONU ++
 
-                // UI state'lerini hata durumuna göre Main thread'de güncelle
+            // 5. USB <-> UDP proxy'yi BAŞLAT
+            Log.d(TAG, "[Proxy Connect] Adım 5: Çift Yönlü UDP Proxy Başlatılıyor...") // ++ EKLENDİ
+            startedProxyJob = startUdpProxy(
+                usbPort = openedPort,
+                udpSocket = openedSocket,
+                targetAddress = InetAddress.getLoopbackAddress(), // Hedef MAVSDK sunucu adresi
+                targetPort = MainActivity.MAVSDK_SERVER_UDP_PORT // Hedef MAVSDK sunucu portu
+            )
+            Log.d(TAG, "[Proxy Connect] Adım 5 Tamamlandı: Çift Yönlü UDP Proxy görevi başlatıldı.") // ++ EKLENDİ
+
+            // 6. MAVSDK System’i keşfet
+            // ... (kalan kod aynı)
+
+                // 6. MAVSDK System’i keşfet
+                Log.d(TAG, "[Proxy Connect] Adım 6: MAVSDK System Keşfediliyor (Timeout: 15sn)...") // ++ EKLENDİ
+                val discoveryTimeout = 15_000L
+                val discoveredSystem = withTimeoutOrNull(discoveryTimeout) {
+                    var system: System? = null
+                    while (isActive) {
+                        // ++ EKLENDİ: Keşif döngüsü başlangıcı logu
+                        Log.d(TAG, "[Proxy Discovery] Yeni System() objesi oluşturuluyor ve bağlantı durumu dinleniyor...")
+                        val tempSystem = System("127.0.0.1", MainActivity.MAVSDK_SERVER_UDP_PORT)
+                        val connected = CompletableDeferred<Boolean>()
+                        val disposable = tempSystem.core.connectionState
+                            .observeOn(AndroidSchedulers.mainThread()) // UI thread'inde gözlemle (log için sorun olmaz)
+                            .subscribe(
+                                { state ->
+                                    Log.d(TAG, "[Proxy Discovery] Connection State: ${state.isConnected}")
+                                    if (state.isConnected && !connected.isCompleted) {
+                                        Log.i(TAG, "[Proxy Discovery] System connected!") // ++ GÜNCELLENDİ: Bağlantı logu
+                                        connected.complete(true)
+                                    }
+                                },
+                                { error ->
+                                    Log.w(TAG, "[Proxy Discovery] Connection state observation failed: ${error.message}")
+                                    if (!connected.isCompleted) {
+                                        connected.completeExceptionally(error)
+                                    }
+                                }
+                            )
+                        try {
+                            Log.d(TAG, "[Proxy Discovery] connected.await() bekleniyor...") // ++ EKLENDİ
+                            connected.await()
+                            Log.i(TAG, "[Proxy Discovery] Await successful, system found.") // ++ GÜNCELLENDİ
+                            system = tempSystem
+                            break // Döngüden çık
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[Proxy Discovery] Await failed or threw exception: ${e.message}")
+                            tempSystem.dispose()
+                            if (!isActive) break
+                            Log.d(TAG, "[Proxy Discovery] Tekrar denemeden önce 200ms bekleniyor...") // ++ EKLENDİ
+                            delay(200)
+                        } finally {
+                            Log.d(TAG, "[Proxy Discovery] RxJava disposable dispose ediliyor.") // ++ EKLENDİ
+                            disposable.dispose()
+                        }
+                        if (!isActive) {
+                            Log.d(TAG, "[Proxy Discovery] Korutin iptal edildi, keşif döngüsü sonlandırılıyor.") // ++ EKLENDİ
+                            break
+                        }
+                    }
+                    system
+                }
+
+                if (discoveredSystem == null) {
+                    Log.e(TAG, "[Proxy Connect] Adım 6 KRİTİK HATA: MAVSDK System keşfedilemedi (${discoveryTimeout}ms timeout).") // ++ GÜNCELLENDİ: Hata logu
+                    serverJob?.cancel()
+                    throw IOException("MAVSDK System keşfedilemedi (${discoveryTimeout}ms timeout), bağlantı başarısız.")
+                }
+                connectedDrone = discoveredSystem
+                Log.i(TAG, "[Proxy Connect] Adım 6 Başarılı: MAVSDK System keşfedildi.") // ++ GÜNCELLENDİ: Başarı logu
+
+                // 7. Telemetri dinleyicilerini ayarla
+                Log.d(TAG, "[Proxy Connect] Adım 7: Telemetri Dinleyicileri Ayarlanıyor...") // ++ EKLENDİ
+                setupTelemetryListeners(connectedDrone)
+                Log.d(TAG, "[Proxy Connect] Adım 7 Tamamlandı: Telemetri Dinleyicileri Ayarlandı.") // ++ EKLENDİ
+
+                // 8. Başarılı bağlantı durumunu UI'da güncelle
+                Log.d(TAG, "[Proxy Connect] Adım 8: Başarılı Bağlantı - UI Güncelleniyor...") // ++ EKLENDİ
                 withContext(Dispatchers.Main) {
-                    showError("Bağlantı kurulamadı: ${e.message?.take(100)}", "Proxy") // Hata mesajını kullanıcıya göster
-                    // Tüm resource state'lerini null yap
+                    proxyUsbConnection = openedConnection
+                    proxyUsbPort = openedPort
+                    udpSocket = openedSocket
+                    mavsdkServer = startedServer
+                    drone = connectedDrone
+                    proxyJob = startedProxyJob
+                    connectionStatusProxy =
+                        "Bağlandı: ${device.deviceName} (${MainActivity.DEFAULT_BAUD_RATE}) via MAVSDK Proxy"
+                    isProxyConnected = true
+                    isConnecting = null
+                    Log.i(TAG, "[Proxy Connect] Bağlantı Başarılı, UI güncellendi.") // ++ GÜNCELLENDİ: Başarı logu
+                }
+            } catch (e: Exception) {
+                // ++ GÜNCELLENDİ: Hatanın hangi aşamada olduğunu anlamak için daha detaylı log
+                Log.e(TAG, "[Proxy Connect] Bağlantı sürecinde KRİTİK HATA: ${e.message}", e)
+
+                // Hata durumunda tüm başlatılan kaynakları GÜVENLİ bir şekilde temizle
+                Log.d(TAG, "[Proxy Connect Hata Temizleme] Başlatılan kaynaklar temizleniyor...") // ++ EKLENDİ
+                try { serverJob?.cancel() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: serverJob iptal edilemedi") }
+                try { startedProxyJob?.cancel() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: proxyJob iptal edilemedi") }
+                try { startedServer?.stop() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: MAVSDK Server durdurulamadı") }
+                try { connectedDrone?.dispose() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: Drone dispose edilemedi") }
+                try { openedSocket?.close() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: UDP Soketi kapatılamadı") }
+                try { openedPort?.close() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: USB Port kapatılamadı") }
+                try { openedConnection?.close() } catch (_: Exception) { Log.e(TAG, "Hata Temizleme: USB Bağlantısı kapatılamadı") }
+                Log.d(TAG, "[Proxy Connect Hata Temizleme] Kaynak temizleme tamamlandı.") // ++ EKLENDİ
+
+                withContext(Dispatchers.Main) {
+                    showError("Proxy Bağlantı kurulamadı: ${e.message?.take(100)}", "Proxy") // Hata mesajını göster
                     proxyUsbConnection = null
                     proxyUsbPort = null
                     udpSocket = null
                     mavsdkServer = null
                     drone = null
                     proxyJob = null
-                    isProxyConnected = false // Bağlantı durumu false
-                    isConnecting = null // Bağlantı işlemi tamamlandı (başarısız)
-
-                    Log.d(TAG, "[Proxy] Bağlantı başarısız, state güncellendi.")
+                    isProxyConnected = false
+                    isConnecting = null
+                    Log.d(TAG, "[Proxy Connect] Bağlantı Başarısız, UI güncellendi.") // ++ EKLENDİ
+                }
+            } finally {
+                Log.d(TAG, "[Proxy Connect] Ana bağlantı korutini finally bloğu.") // ++ EKLENDİ
+                // Eğer 'isConnecting' hala "Proxy" ise (başarılı olmadan bittiyse) null yap
+                if(isConnecting == "Proxy") {
+                    withContext(Dispatchers.Main + NonCancellable) {
+                        isConnecting = null
+                        Log.d(TAG, "[Proxy Connect] 'isConnecting' durumu finally içinde null yapıldı.") // ++ EKLENDİ
+                    }
                 }
             }
-        }
+        } // scope.launch sonu
     }
+
+
 
     // 2. Direct MAVLink ile Bağlanma (io.dronefleet.mavlink + USB)
     // USB seri portu üzerinden doğrudan MAVLink mesajlarını alır ve ayrıştırır, komut gönderir.
@@ -1021,15 +1312,38 @@ fun DroneControllerApp(
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as? UsbManager
                 connection = usbManager?.openDevice(device)
                     ?: throw IllegalStateException("USB Manager servisi bulunamadı.") // Bağlantı null dönerse hata
+                usbManager.deviceList.values.forEach { device ->
+                    Log.d(
+                        "USB_DEBUG", """
+        Device: ${device.deviceName}
+        VID: ${device.vendorId} (0x${device.vendorId.toString(16)})
+        PID: ${device.productId} (0x${device.productId.toString(16)})
+        Protocol: ${device.deviceProtocol}
+    """.trimIndent()
+                    )
+                }
+                val drivers = listOf(
+                    CdcAcmSerialDriver(device),  // STM32 için en yaygın
+                    Ch34xSerialDriver(device),   // CH340 çipli cihazlar için
+                    Cp21xxSerialDriver(device),  // CP210x çipli cihazlar için
+                    FtdiSerialDriver(device)     // FTDI çipli cihazlar için
+                )
 
-                val driver = UsbSerialProber.getDefaultProber().probeDevice(device) // Cihaz için uygun sürücüyü bul
+                val driver = drivers.firstOrNull { it.ports.isNotEmpty() }
+                //val driver = UsbSerialProber.getDefaultProber()
+                //    .probeDevice(device) // Cihaz için uygun sürücüyü bul
                     ?: throw IOException("USB seri sürücüsü bulunamadı.") // Sürücü bulunamazsa hata
 
                 port = driver.ports.firstOrNull() // İlk kullanılabilir portu al
                     ?: throw IOException("USB seri port bulunamadı.") // Port bulunamazsa hata
 
                 port.open(connection) // Portu bağlantı üzerinden aç
-                port.setParameters(baudRate, UsbSerialPort.DATABITS_8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE) // Port parametrelerini ayarla
+                port.setParameters(
+                    baudRate,
+                    UsbSerialPort.DATABITS_8,
+                    UsbSerialPort.STOPBITS_1,
+                    UsbSerialPort.PARITY_NONE
+                ) // Port parametrelerini ayarla
                 Log.d(TAG, "[Direct] USB Port açıldı ve yapılandırıldı (${baudRate} baud).")
 
                 // 2. SerialInputOutputManager'ı Başlat
@@ -1049,38 +1363,54 @@ fun DroneControllerApp(
 
                 // directDataChannel'dan okuyup Pipe OutputStream'ine yazacak Korutin (IO Thread'inde çalışacak)
                 // Bu korutin, IO Manager'ın listener'ı tarafından kanala gönderilen baytları alır ve pipe'a yazar.
-                val pipeWriterJob = scope.launch(Dispatchers.IO + CoroutineName(name = "direct-pipe-writer")) {
-                    Log.d(TAG, "[Direct Pipe Writer] Başlatıldı.")
-                    try {
-                        // directDataChannel'dan gelen byte array'lerini oku (kanal kapandığında döngü sona erer)
-                        for (data in directDataChannel) {
-                            try {
-                                // Gelen veriyi Pipe OutputStream'e yaz. Bu işlem Pipe'ın buffer'ı doluysa bloklayıcıdır.
-                                pipedOutputStreamFromSerial.write(data)
-                            } catch (writeError: IOException) {
-                                // Pipe'a yazma sırasında hata oluşursa (örn. Pipe'ın diğer ucu (InputStream) kapatıldıysa)
-                                if (isActive) Log.e(TAG, "[Direct Pipe Writer] Pipe'a yazma hatası: ${writeError.message}", writeError)
-                                break // Yazma hatasında döngüden çık
-                            }
-                        }
-                        Log.d(TAG, "[Direct Pipe Writer] Kanal okuma döngüsü bitti (kanal kapatıldı veya hata oluştu).")
-                    } catch (e: Exception) {
-                        // Kanal toplama sırasında beklenmedik bir hata oluşursa
-                        if (isActive) Log.e(TAG, "[Direct Pipe Writer] Beklenmedik hata: ${e.message}", e)
-                    } finally {
-                        // Pipe yazar korutini bittiğinde Pipe OutputStream'i kapat.
-                        // Bu, Pipe'ın okuma ucuna (PipedInputStream) stream sonu sinyali gönderir.
+                val pipeWriterJob =
+                    scope.launch(Dispatchers.IO + CoroutineName(name = "direct-pipe-writer")) {
+                        Log.d(TAG, "[Direct Pipe Writer] Başlatıldı.")
                         try {
-                            pipedOutputStreamFromSerial.close()
-                            Log.d(TAG, "[Direct Pipe Writer] PipedOutputStream kapatıldı.")
-                        } catch (e: IOException) {
-                            Log.e(TAG, "[Direct Pipe Writer] PipedOutputStream kapatılırken hata: ${e.message}", e)
+                            // directDataChannel'dan gelen byte array'lerini oku (kanal kapandığında döngü sona erer)
+                            for (data in directDataChannel) {
+                                try {
+                                    // Gelen veriyi Pipe OutputStream'e yaz. Bu işlem Pipe'ın buffer'ı doluysa bloklayıcıdır.
+                                    pipedOutputStreamFromSerial.write(data)
+                                } catch (writeError: IOException) {
+                                    // Pipe'a yazma sırasında hata oluşursa (örn. Pipe'ın diğer ucu (InputStream) kapatıldıysa)
+                                    if (isActive) Log.e(
+                                        TAG,
+                                        "[Direct Pipe Writer] Pipe'a yazma hatası: ${writeError.message}",
+                                        writeError
+                                    )
+                                    break // Yazma hatasında döngüden çık
+                                }
+                            }
+                            Log.d(
+                                TAG,
+                                "[Direct Pipe Writer] Kanal okuma döngüsü bitti (kanal kapatıldı veya hata oluştu)."
+                            )
+                        } catch (e: Exception) {
+                            // Kanal toplama sırasında beklenmedik bir hata oluşursa
+                            if (isActive) Log.e(
+                                TAG,
+                                "[Direct Pipe Writer] Beklenmedik hata: ${e.message}",
+                                e
+                            )
+                        } finally {
+                            // Pipe yazar korutini bittiğinde Pipe OutputStream'i kapat.
+                            // Bu, Pipe'ın okuma ucuna (PipedInputStream) stream sonu sinyali gönderir.
+                            try {
+                                pipedOutputStreamFromSerial.close()
+                                Log.d(TAG, "[Direct Pipe Writer] PipedOutputStream kapatıldı.")
+                            } catch (e: IOException) {
+                                Log.e(
+                                    TAG,
+                                    "[Direct Pipe Writer] PipedOutputStream kapatılırken hata: ${e.message}",
+                                    e
+                                )
+                            }
+                            Log.d(TAG, "[Direct Pipe Writer] Tamamlandı.")
                         }
-                        Log.d(TAG, "[Direct Pipe Writer] Tamamlandı.")
+                        // pipeWriterJob bittiğinde, bu işi başlatan ana korutini (connectDirectUsb içindeki) haberdar etmenin yolları olabilir,
+                        // ancak burada parserJob'ın sonlanması disconnect sürecini tetikler.
                     }
-                    // pipeWriterJob bittiğinde, bu işi başlatan ana korutini (connectDirectUsb içindeki) haberdar etmenin yolları olabilir,
-                    // ancak burada parserJob'ın sonlanması disconnect sürecini tetikler.
-                }
 
                 // 4. MAVLink Komutları Gönderme İçin OutputStream Kurulumu
                 // MAVLink komutlarını göndermek için MavlinkConnection.send() metodu kullanılacaktır.
@@ -1098,7 +1428,11 @@ fun DroneControllerApp(
                             // Veya blocking yazma (dikkatli kullanılmalı):
                             // port.write(byteArray, 100) // 100ms timeout ile yaz
                         } catch (e: IOException) {
-                            Log.e(TAG, "[Direct OutputStream] Tek bayt yazma hatası: ${e.message}", e)
+                            Log.e(
+                                TAG,
+                                "[Direct OutputStream] Tek bayt yazma hatası: ${e.message}",
+                                e
+                            )
                             throw e // Hatayı tekrar fırlat
                         }
                     }
@@ -1110,7 +1444,11 @@ fun DroneControllerApp(
                             // Veya blocking yazma (dikkatli kullanılmalı):
                             // port.write(b, off, len, 100) // 100ms timeout ile yaz
                         } catch (e: IOException) {
-                            Log.e(TAG, "[Direct OutputStream] Bayt dizisi yazma hatası (${len} bayt): ${e.message}", e)
+                            Log.e(
+                                TAG,
+                                "[Direct OutputStream] Bayt dizisi yazma hatası (${len} bayt): ${e.message}",
+                                e
+                            )
                             throw e // Hatayı tekrar fırlat
                         }
                     }
@@ -1134,17 +1472,20 @@ fun DroneControllerApp(
                 // 5. MAVLink Ayrıştırma Korutinini Başlat (Pipe'tan okuyacak ve commandOutputStream'ı kullanacak)
                 // Bu korutin, pipedInputStreamForParser'dan okuyarak MAVLink mesajlarını ayrıştırır.
                 // Oluşturulan commandOutputStream da MAVLink mesajları göndermek için kullanılacaktır.
-                directParserJob = startDirectMavlinkParser(pipedInputStreamForParser, commandOutputStream)
+                directParserJob =
+                    startDirectMavlinkParser(pipedInputStreamForParser, commandOutputStream)
 
                 // IO Manager, Port ve Connection başarılı olduysa UI state'leri Main thread'de güncelle
                 withContext(Dispatchers.Main) {
                     directUsbConnection = connection // Bağlantı referansını kaydet
                     directUsbPort = port // Port referansını kaydet
                     directIoManager = ioManager // IO Manager referansını kaydet
-                    directCommandOutputStream = commandOutputStream // Command OutputStream referansını state'e kaydet
+                    directCommandOutputStream =
+                        commandOutputStream // Command OutputStream referansını state'e kaydet
                     // directParserJob state'i zaten yukarıda atandı
 
-                    connectionStatusDirect = "Bağlandı: ${device.deviceName} (${baudRate})" // UI durum mesajı
+                    connectionStatusDirect =
+                        "Bağlandı: ${device.deviceName} (${baudRate})" // UI durum mesajı
                     isDirectConnected = true // Bağlantı durumu state'ini true yap
                     isConnecting = null // Bağlantı işlemi tamamlandı
 
@@ -1160,14 +1501,38 @@ fun DroneControllerApp(
                 Log.e(MainActivity.TAG, "[Direct] Bağlantı Hatası: ${e.message}", e)
                 // Hata oluşursa, o ana kadar başarılı olan tüm kaynakları temizle
                 // IO Manager durdurulacak (bu listener'ın hata vermesine neden olabilir, dikkatli ol)
-                try { ioManager?.stop() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Direct] Error stopping ioManager on error", e)}
+                try {
+                    ioManager?.stop()
+                } catch (e: Exception) {
+                    Log.e(MainActivity.TAG, "[Direct] Error stopping ioManager on error", e)
+                }
                 // Port ve Connection kapatılacak
-                try { port?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Direct] Error closing port on error", e) }
-                try { connection?.close() } catch (e: Exception) { Log.e(MainActivity.TAG, "[Direct] Error closing connection on error", e)}
+                try {
+                    port?.close()
+                } catch (e: IOException) {
+                    Log.e(MainActivity.TAG, "[Direct] Error closing port on error", e)
+                }
+                try {
+                    connection?.close()
+                } catch (e: Exception) {
+                    Log.e(MainActivity.TAG, "[Direct] Error closing connection on error", e)
+                }
                 // Pipe input stream'i kapat (eğer oluşturulduysa). Bu parser job'ı (varsa) sonlandırır.
-                try { pipedInputStreamForParser?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Direct] Error closing pipe input stream on error", e) }
+                try {
+                    pipedInputStreamForParser?.close()
+                } catch (e: IOException) {
+                    Log.e(MainActivity.TAG, "[Direct] Error closing pipe input stream on error", e)
+                }
                 // Command OutputStream'i kapat (eğer oluşturulduysa).
-                try { commandOutputStream?.close() } catch (e: IOException) { Log.e(MainActivity.TAG, "[Direct] Error closing command output stream on error", e) }
+                try {
+                    commandOutputStream?.close()
+                } catch (e: IOException) {
+                    Log.e(
+                        MainActivity.TAG,
+                        "[Direct] Error closing command output stream on error",
+                        e
+                    )
+                }
                 // Pipe writer job'ı (varsa) iptal et. directDataChannel.close() zaten cleanUpResources içinde yapılıyor,
                 // bu genellikle pipeWriterJob'ı sonlandırır. Explicit cancel da yapılabilir.
                 // Eğer pipeWriterJob bu catch bloğundan önce başlatıldıysa ve hala aktifse, iptal etmek gerekebilir.
@@ -1177,13 +1542,17 @@ fun DroneControllerApp(
 
                 // UI state'lerini hata durumuna göre Main thread'de güncelle
                 withContext(Dispatchers.Main) {
-                    showError("Bağlantı kurulamadı: ${e.message?.take(100)}", "Direct") // Hata mesajını kullanıcıya göster
+                    showError(
+                        "Bağlantı kurulamadı: ${e.message?.take(100)}",
+                        "Direct"
+                    ) // Hata mesajını kullanıcıya göster
                     // Tüm resource state'lerini null yap
                     directUsbConnection = null
                     directUsbPort = null
                     directIoManager = null
                     directCommandOutputStream = null
-                    directParserJob = null // Hata durumunda parser job başlatılamamış veya hata vermiş olmalı
+                    directParserJob =
+                        null // Hata durumunda parser job başlatılamamış veya hata vermiş olmalı
                     isDirectConnected = false // Bağlantı durumu false
                     isConnecting = null // Bağlantı işlemi tamamlandı (başarısız)
 
@@ -1209,7 +1578,7 @@ fun DroneControllerApp(
         mavlinkConnection.send1(255, 0, command)
     }
 
-    fun startRcCalibration(mavlinkConnection : MavlinkConnection) {
+    fun startRcCalibration(mavlinkConnection: MavlinkConnection) {
         val command = CommandLong.builder()
             .targetSystem(1) // Drone system ID
             .targetComponent(1) // Drone component ID
@@ -1225,7 +1594,6 @@ fun DroneControllerApp(
             }
         }
     }
-
 
 
     fun handleError(e: Exception) {
@@ -1261,6 +1629,7 @@ fun DroneControllerApp(
             Log.e(TAG, "Yanıt dinleme hatası", e)
         }
     }
+
     fun sendMavlinkCommand(payload: Any) {
         if (!isDirectConnected || directCommandOutputStream == null) {
             Log.w(TAG, "[Direct] Bağlı değilken komut gönderme denemesi")
@@ -1272,7 +1641,10 @@ fun DroneControllerApp(
 
         scope.launch(Dispatchers.IO) {
             try {
-                Log.d(TAG, "[Direct Send] Komut gönderme başlatıldı: ${payload::class.java.simpleName}")
+                Log.d(
+                    TAG,
+                    "[Direct Send] Komut gönderme başlatıldı: ${payload::class.java.simpleName}"
+                )
 
                 // Tek seferlik bağlantı oluşturma
                 val mavConn = MavlinkConnection.builder(null, directCommandOutputStream)
@@ -1286,14 +1658,19 @@ fun DroneControllerApp(
                         mavConn.send1(255, 0, payload) // MAVLink 1.0
 
                     }
-                    is Heartbeat  -> {
+
+                    is Heartbeat -> {
                         mavConn.send1(255, 0, payload) // MAVLink 1.0
                         // mavConn.send2(255, 0, payload) // MAVLink 2.0
                     }
+
                     else -> throw IllegalArgumentException("Geçersiz payload tipi")
                 }
 
-                Log.d(TAG, "[Direct Send] Komut başarıyla gönderildi: ${payload::class.java.simpleName}")
+                Log.d(
+                    TAG,
+                    "[Direct Send] Komut başarıyla gönderildi: ${payload::class.java.simpleName}"
+                )
 
                 // RC kalibrasyonu başlat
                 startRcCalibration(mavConn)
@@ -1310,7 +1687,6 @@ fun DroneControllerApp(
             }
         }
     }
-
 
 
     // --- UI Composable ---
@@ -1337,6 +1713,14 @@ fun DroneControllerApp(
                 Text("USB Cihazlarını Tara")
             }
 
+            fun isInBootMode(device: UsbDevice): Boolean {
+                // STM32 Bootloader VID/PID
+                return (device.vendorId == 0x0483 &&
+                        (device.productId == 0xDF11 || device.productId == 0xDEAD))
+            }
+
+// Bağlantı denemeden önce kontrol
+
             // Seçilen bir USB cihazı varsa detaylarını ve bağlantı butonlarını göster
             selectedUsbDevice?.let { device ->
                 Text("Seçilen Cihaz: ${device.deviceName ?: "Bilinmiyor"}") // Cihaz adını göster
@@ -1349,6 +1733,21 @@ fun DroneControllerApp(
                         onClick = {
                             // USB izni kontrolü ve isteme
                             if (checkUsbPermission(device)) {
+                                /*if (isInBootMode(device)) {
+                                     showError("Kart boot modunda! Lütfen BOOT0 pinini GND'ye bağlayıp reset atın")
+                                    // DFU modunda özel işlemler
+                                    val driver = FtdiSerialDriver(device) // STM32 bootloader genellikle FTDI gibi davranır
+                                    try {
+                                        // Bootloader ile iletişim kur
+                                        port.write("0x7F".toByteArray(), 1000) // STM32 bootloader sync karakteri
+                                        // Firmware yükleme işlemleri...
+                                    } catch (e: Exception) {
+                                        showError("Bootloader modunda firmware yükleyin")
+                                    }
+                                } else {
+                                    // Normal bağlantı
+                                    connectProxy((device))
+                                }*/
                                 connectProxy(device) // İzin varsa doğrudan bağlan
                             } else {
                                 // İzin yoksa izin iste ve sonuç geldiğinde bağlanmayı dene
@@ -1356,7 +1755,10 @@ fun DroneControllerApp(
                                     if (granted && grantedDevice != null) {
                                         connectProxy(grantedDevice)
                                     } else {
-                                        showError("USB izni verilmedi.", "Proxy") // İzin verilmediyse hata göster
+                                        showError(
+                                            "USB izni verilmedi.",
+                                            "Proxy"
+                                        ) // İzin verilmediyse hata göster
                                     }
                                 }
                             }
@@ -1371,14 +1773,23 @@ fun DroneControllerApp(
                         onClick = {
                             // USB izni kontrolü ve isteme
                             if (checkUsbPermission(device)) {
-                                connectDirectUsb(device, MainActivity.DEFAULT_BAUD_RATE) // İzin varsa doğrudan bağlan
+                                connectDirectUsb(
+                                    device,
+                                    MainActivity.DEFAULT_BAUD_RATE
+                                ) // İzin varsa doğrudan bağlan
                             } else {
                                 // İzin yoksa izin iste ve sonuç geldiğinde bağlanmayı dene
                                 requestUsbPermission(device) { granted, grantedDevice ->
                                     if (granted && grantedDevice != null) {
-                                        connectDirectUsb(grantedDevice, MainActivity.DEFAULT_BAUD_RATE)
+                                        connectDirectUsb(
+                                            grantedDevice,
+                                            MainActivity.DEFAULT_BAUD_RATE
+                                        )
                                     } else {
-                                        showError("USB izni verilmedi.", "Direct") // İzin verilmediyse hata göster
+                                        showError(
+                                            "USB izni verilmedi.",
+                                            "Direct"
+                                        ) // İzin verilmediyse hata göster
                                     }
                                 }
                             }
@@ -1410,7 +1821,9 @@ fun DroneControllerApp(
             // Cihaz Seçici Dialog
             if (showDeviceSelector) { // showDeviceSelector true ise dialogu göster
                 AlertDialog(
-                    onDismissRequest = { showDeviceSelector = false }, // Dialog dışında tıklanınca kapat
+                    onDismissRequest = {
+                        showDeviceSelector = false
+                    }, // Dialog dışında tıklanınca kapat
                     title = { Text("USB Cihazı Seçin") }, // Dialog başlığı
                     text = { // Dialog içeriği (cihaz listesi)
                         LazyColumn { // Kaydırılabilir liste
@@ -1423,7 +1836,10 @@ fun DroneControllerApp(
                                         showDeviceSelector = false // Dialogu kapat
                                     }) {
                                         Column(modifier = Modifier.fillMaxWidth()) { // Cihaz bilgileri
-                                            Text(device.deviceName ?: "Bilinmiyor", fontWeight = FontWeight.Bold)
+                                            Text(
+                                                device.deviceName ?: "Bilinmiyor",
+                                                fontWeight = FontWeight.Bold
+                                            )
                                             Text("Vendor: ${device.vendorId}, Product: ${device.productId}")
                                         }
                                     }
@@ -1440,20 +1856,34 @@ fun DroneControllerApp(
                 )
             }
 
-            Divider(modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)) // Bölücü çizgi
+            Divider(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) // Bölücü çizgi
 
             // Bağlantı Durumları Bölümü
-            Text("Proxy Durumu: $connectionStatusProxy", fontWeight = FontWeight.Bold) // Proxy durumu metni
-            Text("Direct Durumu: $connectionStatusDirect", fontWeight = FontWeight.Bold) // Direct durumu metni
+            Text(
+                "Proxy Durumu: $connectionStatusProxy",
+                fontWeight = FontWeight.Bold
+            ) // Proxy durumu metni
+            Text(
+                "Direct Durumu: $connectionStatusDirect",
+                fontWeight = FontWeight.Bold
+            ) // Direct durumu metni
 
-            Divider(modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)) // Bölücü çizgi
+            Divider(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) // Bölücü çizgi
 
             // Telemetri Verileri Bölümü
-            Text("Telemetri Verileri", fontSize = 20.sp, fontWeight = FontWeight.Bold) // Telemetri başlığı
+            Text(
+                "Telemetri Verileri",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            ) // Telemetri başlığı
 
             // Proxy Telemetri Kartı (Basit gösterim)
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -1472,7 +1902,13 @@ fun DroneControllerApp(
                         // GPS Verileri
                         Text("GPS Fix: ${fixType.format()} (Uydular: ${satellitesVisible.format()})")
                         Text("Konum: Lat ${latitude.format()}, Lon ${longitude.format()}")
-                        Text("Yükseklik: MSL ${altitudeMsl.format(2)} m, Rel ${relativeAltitude.format(2)} m")
+                        Text(
+                            "Yükseklik: MSL ${altitudeMsl.format(2)} m, Rel ${
+                                relativeAltitude.format(
+                                    2
+                                )
+                            } m"
+                        )
                         Text("Yön (Heading): ${heading.format(1)}°")
 
                         // Uçuş Verileri
@@ -1481,7 +1917,13 @@ fun DroneControllerApp(
                         Text("Tırmanma Oranı: ${climbRate.format(2)} m/s")
 
                         // Durum Verileri
-                        Text("Tutum: Roll ${roll.format(1)}°, Pitch ${pitch.format(1)}°, Yaw ${yaw.format(1)}°")
+                        Text(
+                            "Tutum: Roll ${roll.format(1)}°, Pitch ${pitch.format(1)}°, Yaw ${
+                                yaw.format(
+                                    1
+                                )
+                            }°"
+                        )
                         Text("Durum: ${if (armed == true) "Armed" else if (armed == false) "Disarmed" else "N/A"}, Mod: ${mode ?: "N/A"}")
 
                         // Batarya Verileri
@@ -1497,9 +1939,11 @@ fun DroneControllerApp(
                 }
             }
 
-            Divider(modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 8.dp)) // Bölücü çizgi
+            Divider(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp)
+            ) // Bölücü çizgi
 
             // Örnek Komut Gönderme Butonu (Direct bağlıyken aktif)
 
@@ -1527,26 +1971,29 @@ fun DroneControllerApp(
                 Text("Örnek Komut Gönder (Heartbeat)") // Buton metni
             }
 
-            Button(onClick = {val command = CommandLong.builder()
-                .targetSystem(1)
-                .targetComponent(1)
-                .command(MavCmd.MAV_CMD_PREFLIGHT_STORAGE)
-                .param1(1f) // 1=parametreleri kaydet
-                .confirmation(0)
-                .build()
+            Button(onClick = {
+                val command = CommandLong.builder()
+                    .targetSystem(1)
+                    .targetComponent(1)
+                    .command(MavCmd.MAV_CMD_PREFLIGHT_STORAGE)
+                    .param1(1f) // 1=parametreleri kaydet
+                    .confirmation(0)
+                    .build()
 
-                sendMavlinkCommand(command)}) {
+                sendMavlinkCommand(command)
+            }) {
                 Text("Kalibrasyon Testi")
             }
 
-            Button(onClick = { val command = CommandLong.builder()
-                .targetSystem(1)      // Drone'un system ID'si (genellikle 1)
-                .targetComponent(1) // Drone'un component ID'si (genellikle 1)
-                .command(MavCmd.MAV_CMD_COMPONENT_ARM_DISARM)
-                .confirmation(0)                  // Onay kodu (0 genellikle kullanılır)
-                .param1(if (true) 1f else 0f)      // 1=ARM, 0=DISARM
-                .param2(0f)                       // Force parametresi (0=normal, 1=zorla)
-                .build()
+            Button(onClick = {
+                val command = CommandLong.builder()
+                    .targetSystem(1)      // Drone'un system ID'si (genellikle 1)
+                    .targetComponent(1) // Drone'un component ID'si (genellikle 1)
+                    .command(MavCmd.MAV_CMD_COMPONENT_ARM_DISARM)
+                    .confirmation(0)                  // Onay kodu (0 genellikle kullanılır)
+                    .param1(if (true) 1f else 0f)      // 1=ARM, 0=DISARM
+                    .param2(0f)                       // Force parametresi (0=normal, 1=zorla)
+                    .build()
 
                 scope.launch(Dispatchers.IO) {
                     try {
@@ -1555,20 +2002,23 @@ fun DroneControllerApp(
                     } catch (e: Exception) {
                         Log.e("ARM", "Komut gönderilemedi", e)
                     }
-                }}) {
+                }
+            }) {
                 Text("ARM Testi")
             }
 
-            Button(onClick = { val command = CommandLong.builder()
-                .targetSystem(1)
-                .targetComponent(1)
-                .command(MavCmd.MAV_CMD_SET_MESSAGE_INTERVAL)
-                .param1(33f) // GLOBAL_POSITION_INT mesaj ID
-                .param2(1000000f) // 1 saniye (mikrosaniyede)
-                .confirmation(0)
-                .build()
+            Button(onClick = {
+                val command = CommandLong.builder()
+                    .targetSystem(1)
+                    .targetComponent(1)
+                    .command(MavCmd.MAV_CMD_TURN_LIGHT)
+                    .param1(33f) // GLOBAL_POSITION_INT mesaj ID
+                    .param2(1000000f) // 1 saniye (mikrosaniyede)
+                    .confirmation(0)
+                    .build()
 
-                sendMavlinkCommand(command)}) {
+                sendMavlinkCommand(command)
+            }) {
                 Text("GPS Etkinleştir")
             }
             // İnternet İzni İsteme Butonu (Proxy için gerekebilir)
@@ -1577,6 +2027,7 @@ fun DroneControllerApp(
             }
         }
     }
+
 }
 
 // Önizleme Composable Fonksiyonu
