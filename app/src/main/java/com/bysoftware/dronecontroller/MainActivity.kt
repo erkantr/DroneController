@@ -1,22 +1,10 @@
 package com.bysoftware.dronecontroller
 
-// import android.provider.Settings // Kullanılmıyorsa kaldırılabilir
-// import androidx.compose.ui.graphics.Color // Kullanılmıyorsa kaldırılabilir
-// Kanalı recieveAsFlow ile okuyorsak kapandığında ClosedReceiveChannelException fırlatabilir
-
-// === MAVLink Kütüphanesi Importları ===
-// Yaygın kullanılan MAVLink mesajları (common dialect)
-// İhtiyaç duyulan enum ve flag importları (common dialect):
-
-// Eğer ArduPilot kullanıyorsanız ArduPilot dialect importunu ve builder'a eklemeyi unutmayın
-// import io.dronefleet.mavlink.ardupilotmega.ArduPilotDialect
-
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Context.USB_SERVICE
 import android.content.Intent
 import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
@@ -24,7 +12,6 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Message
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -35,72 +22,453 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import com.bysoftware.dronecontroller.MainActivity.Companion.TAG
+import androidx.lifecycle.lifecycleScope
+import com.bysoftware.dronecontroller.config.AppConfig
+import com.bysoftware.dronecontroller.model.DirectTelemetryState
+import com.bysoftware.dronecontroller.service.DirectConnectionService
+import com.bysoftware.dronecontroller.service.ProxyConnectionService
+import com.bysoftware.dronecontroller.ui.navigation.AppNavigation
 import com.bysoftware.dronecontroller.ui.theme.DroneControllerTheme
-import com.hoho.android.usbserial.driver.CdcAcmSerialDriver
-import com.hoho.android.usbserial.driver.Ch34xSerialDriver
-import com.hoho.android.usbserial.driver.Cp21xxSerialDriver
-import com.hoho.android.usbserial.driver.FtdiSerialDriver
+import com.bysoftware.dronecontroller.utils.format
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
-import com.hoho.android.usbserial.util.SerialInputOutputManager
-import io.dronefleet.mavlink.MavlinkConnection
-import io.dronefleet.mavlink.MavlinkDialect
-import io.dronefleet.mavlink.MavlinkMessage
-import io.dronefleet.mavlink.ardupilotmega.ArdupilotmegaDialect
-import io.dronefleet.mavlink.common.Attitude
-import io.dronefleet.mavlink.common.BatteryStatus
-import io.dronefleet.mavlink.common.CommandLong
-import io.dronefleet.mavlink.common.GlobalPositionInt
-import io.dronefleet.mavlink.common.GpsFixType
-import io.dronefleet.mavlink.common.GpsRawInt
-import io.dronefleet.mavlink.common.MavCmd
-import io.dronefleet.mavlink.common.MavMode
-import io.dronefleet.mavlink.common.MavSeverity
-import io.dronefleet.mavlink.common.ParamSet
-import io.dronefleet.mavlink.common.Statustext
-import io.dronefleet.mavlink.common.SysStatus
-import io.dronefleet.mavlink.common.VfrHud
-import io.dronefleet.mavlink.minimal.Heartbeat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.IOException
+import java.text.DecimalFormat
+import io.dronefleet.mavlink.minimal.Heartbeat // DirectConnectionService'e taşınacak komutlar için gerekli olabilir
 import io.dronefleet.mavlink.minimal.MavAutopilot
-import io.dronefleet.mavlink.minimal.MavModeFlag
 import io.dronefleet.mavlink.minimal.MavState
 import io.dronefleet.mavlink.minimal.MavType
-import io.dronefleet.mavlink.standard.StandardDialect
-import io.mavsdk.System
-import io.mavsdk.mavsdkserver.MavsdkServer
-import io.reactivex.android.schedulers.AndroidSchedulers
-import io.reactivex.disposables.CompositeDisposable
-import io.reactivex.schedulers.Schedulers
-import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.channels.ClosedSendChannelException
-import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.io.InputStream
-import java.io.OutputStream
-import java.io.PipedInputStream
-import java.io.PipedOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.text.DecimalFormat
-import java.util.concurrent.TimeUnit
+import io.dronefleet.mavlink.minimal.MavModeFlag
 
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var usbManager: UsbManager
+    private var usbPermissionCallback: ((Boolean, UsbDevice?) -> Unit)? = null
+
+    // USB İzin Alıcısı
+    private val usbPermissionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (AppConfig.ACTION_USB_PERMISSION == intent.action) {
+                synchronized(this) {
+                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        device?.let {
+                            Log.i(AppConfig.TAG, "USB izni verildi: ${it.deviceName}")
+                            usbPermissionCallback?.invoke(true, it)
+                        }
+                    } else {
+                        Log.w(AppConfig.TAG, "USB izni reddedildi: ${device?.deviceName}")
+                        Toast.makeText(context, "USB izni reddedildi.", Toast.LENGTH_SHORT).show()
+                        usbPermissionCallback?.invoke(false, device)
+                    }
+                    usbPermissionCallback = null // Callback'i temizle
+                }
+            }
+        }
+    }
+
+    // Activity Result Launcher (İzinler için)
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+            permissions.entries.forEach {
+                Log.d(AppConfig.TAG, "${it.key} = ${it.value}")
+                if (!it.value) {
+                    Toast.makeText(this, "${it.key} izni gerekli!", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+    // --- Activity Yaşam Döngüsü ---
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge() // Kenardan kenara UI için
+
+        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+
+        // USB izin alıcısını kaydet
+        val filter = IntentFilter(AppConfig.ACTION_USB_PERMISSION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbPermissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(usbPermissionReceiver, filter)
+        }
+
+        // Gerekli izinleri iste (Android 12+ için Bluetooth izni örneği eklendi)
+        val requiredPermissions = mutableListOf(Manifest.permission.INTERNET)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // requiredPermissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            // requiredPermissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+        requestPermissionLauncher.launch(requiredPermissions.toTypedArray())
+
+
+        setContent {
+            DroneControllerTheme {
+                AppNavigation(
+                    mainActivity = this,
+                    requestUsbPermission = ::requestPermission, // MainActivity::requestPermission olarak geçer
+                    checkUsbPermission = ::checkUsbPermission, // MainActivity::checkUsbPermission
+                    getUsbDevices = ::getUsbDevices, // MainActivity::getUsbDevices
+                    openUsbDeviceConnection = ::openDeviceConnection // MainActivity::openDeviceConnection
+                )
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(usbPermissionReceiver)
+        // Servisler ve diğer kaynaklar DroneControllerApp içinde veya ViewModel'da temizlenmeli
+    }
+
+    // --- USB İzin ve Bağlantı Yardımcıları ---
+    fun requestPermission(device: UsbDevice, callback: (Boolean, UsbDevice?) -> Unit) {
+        if (usbManager.hasPermission(device)) {
+            Log.d(AppConfig.TAG, "USB izni zaten var: ${device.deviceName}")
+            callback(true, device)
+            return
+        }
+        Log.d(AppConfig.TAG, "USB izni isteniyor: ${device.deviceName}")
+        this.usbPermissionCallback = callback // Callback'i sakla
+        val permissionIntent = PendingIntent.getBroadcast(
+            this,
+            AppConfig.USB_PERMISSION_REQUEST_CODE,
+            Intent(AppConfig.ACTION_USB_PERMISSION),
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT // SDK 31+ için MUTABLE gerekli
+        )
+        usbManager.requestPermission(device, permissionIntent)
+    }
+
+    fun checkUsbPermission(device: UsbDevice): Boolean {
+        return usbManager.hasPermission(device)
+    }
+
+    fun getUsbDevices(): List<UsbDevice> {
+        return usbManager.deviceList.values.toList()
+    }
+
+    fun openDeviceConnection(device: UsbDevice): UsbDeviceConnection? {
+        return try {
+            usbManager.openDevice(device)
+        } catch (e: Exception) {
+            Log.e(AppConfig.TAG, "USB cihaz bağlantısı açılamadı: ${device.deviceName}", e)
+            null
+        }
+    }
+}
+
+
+// ==================================
+// DroneControllerApp Ana Bestekeri
+// ==================================
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DroneControllerApp(
+    mainActivity: MainActivity, // USB işlemleri için
+    requestUsbPermission: (UsbDevice, (Boolean, UsbDevice?) -> Unit) -> Unit,
+    checkUsbPermission: (UsbDevice) -> Boolean,
+    getUsbDevices: () -> List<UsbDevice>,
+    openUsbDeviceConnection: (UsbDevice) -> UsbDeviceConnection?,
+    navigateToMap: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // --- State Değişkenleri ---
+    var selectedUsbDevice by remember { mutableStateOf<UsbDevice?>(null) }
+    var usbDevices by remember { mutableStateOf(emptyList<UsbDevice>()) }
+    var showDeviceSelector by remember { mutableStateOf(false) }
+    var isConnecting by remember { mutableStateOf<String?>(null) } // "Direct" veya "Proxy" veya null
+
+
+    // --- Servis Örnekleri ---
+    val directConnectionService = remember {
+        DirectConnectionService(
+            context = context,
+            scope = scope,
+            showErrorCallback = { message, type ->
+                scope.launch { snackbarHostState.showSnackbar("Hata ($type): $message") }
+                if (type == "Direct") isConnecting = null
+            },
+            onConnectionStateChange = { connecting -> if(connecting) isConnecting = "Direct" else if(isConnecting == "Direct") isConnecting = null }
+        )
+    }
+
+    val proxyConnectionService = remember {
+        ProxyConnectionService(
+            context = context,
+            scope = scope,
+            showErrorCallback = { message, type ->
+                scope.launch { snackbarHostState.showSnackbar("Hata ($type): $message") }
+                 if (type == "Proxy") isConnecting = null
+            },
+            onConnectionStateChange = { connecting -> if(connecting) isConnecting = "Proxy" else if(isConnecting == "Proxy") isConnecting = null }
+        )
+    }
+
+    // Servislerden gelen durumları topla
+    val directTelemetryState by directConnectionService.directTelemetryState.collectAsState()
+    val isDirectConnected by directConnectionService.isDirectConnected.collectAsState()
+    val connectionStatusDirect by directConnectionService.connectionStatusDirect.collectAsState()
+
+    val telemetryDataProxy by proxyConnectionService.telemetryDataProxy.collectAsState()
+    val isProxyConnected by proxyConnectionService.isProxyConnected.collectAsState()
+    val connectionStatusProxy by proxyConnectionService.connectionStatusProxy.collectAsState()
+
+
+    // --- Efektler ---
+    LaunchedEffect(Unit) { // Bir kerelik yükleme
+        usbDevices = getUsbDevices()
+    }
+
+    // Activity destroy olduğunda servisleri temizle
+    DisposableEffect(Unit) {
+        onDispose {
+            Log.d(AppConfig.TAG, "DroneControllerApp onDispose, servisler temizleniyor.")
+            directConnectionService.disconnectDirectUsb(false)
+            proxyConnectionService.disconnectProxy(false)
+            // Gerekirse burada diğer kaynakları da temizle
+        }
+    }
+
+    // --- Yardımcı Fonksiyonlar (UI için) ---
+    fun showError(message: String, type: String = "Genel") {
+        scope.launch {
+            snackbarHostState.showSnackbar("Hata ($type): $message")
+        }
+        // Bağlantı durumlarını da güncelle
+        if (type == "Proxy" && isConnecting == "Proxy") {
+            // proxyConnectionService.updateStatus("Hata (Proxy)") // Servis kendi durumunu günceller
+            isConnecting = null
+        }
+        if (type == "Direct" && isConnecting == "Direct") {
+            // directConnectionService.updateStatus("Hata (Direkt)") // Servis kendi durumunu günceller
+            isConnecting = null
+        }
+        Log.e(AppConfig.TAG, "UI Hata: $message (Tip: $type)")
+    }
+
+
+    // --- USB Cihaz Seçimi ve Bağlantı Başlatma ---
+    fun connectToDevice(device: UsbDevice, type: String) {
+        selectedUsbDevice = device
+        if (!checkUsbPermission(device)) {
+            requestUsbPermission(device) { granted, permittedDevice ->
+                if (granted && permittedDevice != null) {
+                    Log.i(AppConfig.TAG, "USB izni alındı, bağlantı kuruluyor: ${permittedDevice.deviceName}, Tip: $type")
+                    initiateConnection(permittedDevice, type, openUsbDeviceConnection)
+                } else {
+                    showError("USB izni reddedildi.", type)
+                }
+            }
+        } else {
+             Log.i(AppConfig.TAG, "USB izni zaten var, bağlantı kuruluyor: ${device.deviceName}, Tip: $type")
+            initiateConnection(device, type, openUsbDeviceConnection)
+        }
+    }
+
+    fun initiateConnection(device: UsbDevice, type: String, openConnection: (UsbDevice) -> UsbDeviceConnection?) {
+        val connection = openConnection(device)
+        if (connection == null) {
+            showError("USB cihazına bağlantı (connection) kurulamadı.", type)
+            isConnecting = null
+            return
+        }
+
+        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(mainActivity.getSystemService(Context.USB_SERVICE) as UsbManager)
+        val driver = drivers.find { it.device == device }
+        if (driver == null || driver.ports.isEmpty()) {
+            showError("Bu USB cihazı için uygun sürücü bulunamadı veya port yok.", type)
+            connection.close()
+            isConnecting = null
+            return
+        }
+        val port = driver.ports[0] // Genellikle ilk port kullanılır
+
+        if (type == "Proxy") {
+            directConnectionService.disconnectDirectUsb(showStatusUpdate = false) // Diğer bağlantıyı kes
+            proxyConnectionService.connectProxy(port, connection)
+        } else if (type == "Direct") {
+            proxyConnectionService.disconnectProxy(showStatusUpdate = false) // Diğer bağlantıyı kes
+            directConnectionService.connectDirectUsb(port, connection)
+        }
+    }
+
+
+    // --- UI ---
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Drone Controller") },
+                actions = {
+                    IconButton(onClick = navigateToMap) {
+                        Icon(Icons.Filled.Map, contentDescription = "Harita")
+                    }
+                    // Ayarlar butonu (örnek)
+                    IconButton(onClick = { /* Ayarlar ekranına git */ }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Ayarlar")
+                    }
+                }
+            )
+        }
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()), // Dikey kaydırma
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // --- Cihaz Seçim Alanı ---
+            Button(
+                onClick = {
+                    usbDevices = getUsbDevices() // Listeyi yenile
+                    showDeviceSelector = true
+                },
+                enabled = isConnecting == null // Sadece bağlantı yokken aktif
+            ) {
+                Text("USB Cihaz Seç (${usbDevices.size})")
+            }
+
+            if (showDeviceSelector) {
+                DeviceSelectorDialog(
+                    devices = usbDevices,
+                    onDeviceSelected = { device, type ->
+                        showDeviceSelector = false
+                        // connectToDevice(device, type) // Bu satır MainActivity içinde zaten var, tekrar tanımlamaya gerek yok
+                         if (!checkUsbPermission(device)) {
+                            requestUsbPermission(device) { granted, permittedDevice ->
+                                if (granted && permittedDevice != null) {
+                                    initiateConnection(permittedDevice, type, openUsbDeviceConnection)
+                                } else {
+                                    scope.launch{ snackbarHostState.showSnackbar("USB izni reddedildi.")}
+                                }
+                            }
+                        } else {
+                            initiateConnection(device, type, openUsbDeviceConnection)
+                        }
+                    },
+                    onDismiss = { showDeviceSelector = false }
+                )
+            }
+
+            Text("Bağlantı Durumu (Direkt): $connectionStatusDirect", fontWeight = FontWeight.Bold)
+            Text("Bağlantı Durumu (Proxy): $connectionStatusProxy", fontWeight = FontWeight.Bold)
+            if (isConnecting != null) {
+                 CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                 Text("$isConnecting bağlantısı deneniyor...", fontSize = 12.sp, color = Color.Gray)
+            }
+
+
+            // --- Kontrol Butonları ---
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { directConnectionService.disconnectDirectUsb() },
+                    enabled = isDirectConnected && isConnecting == null,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Direkt Bağlantıyı Kes") }
+
+                Button(
+                    onClick = { proxyConnectionService.disconnectProxy() },
+                    enabled = isProxyConnected && isConnecting == null,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Proxy Bağlantıyı Kes") }
+            }
+
+
+            // --- Telemetri Göstergeleri ---
+            if (isDirectConnected) {
+                DirectTelemetryCard(telemetry = directTelemetryState)
+                // Direct MAVLink Komut Gönderme Butonları
+                Spacer(Modifier.height(10.dp))
+                Text("Direkt Komutlar", style = MaterialTheme.typography.titleMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = { 
+                        val heartbeat = Heartbeat.builder()
+                            .type(MavType.MAV_TYPE_GCS)
+                            .autopilot(MavAutopilot.MAV_AUTOPILOT_INVALID)
+                            .baseMode(MavModeFlag.MAV_MODE_FLAG_MANUAL_INPUT_ENABLED)
+                            .customMode(0)
+                            .systemStatus(MavState.MAV_STATE_ACTIVE)
+                            .mavlinkVersion(3)
+                            .build()
+                        directConnectionService.sendMavlinkCommand(heartbeat)
+                    }) { Text("Heartbeat Gönder") }
+                    
+                    Button(onClick = { directConnectionService.sendArmDisarmCommand(true) }) { Text("ARM") }
+                    Button(onClick = { directConnectionService.sendArmDisarmCommand(false) }) { Text("DISARM") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                     Button(onClick = { directConnectionService.sendRequestGpsStreamCommand() }) { Text("GPS Stream İste") }
+                     Button(onClick = { directConnectionService.sendRcCalibrationCommand() }) { Text("RC Kalibrasyon") }
+                }
+            }
+
+            if (isProxyConnected) {
+                ProxyTelemetryCard(telemetryData = telemetryDataProxy, drone = proxyConnectionService.drone)
+            }
+
+            Spacer(modifier = Modifier.weight(1f)) // Alt kısmı itmek için
+            Text("MAVLink V2 Kotlin Projesi", fontSize = 10.sp, color = Color.Gray)
+        }
+    }
+}
+
+// --- Yardımcı Bestekerler (Dialog, Kartlar vb.) ---
+@Composable
+fun DeviceSelectorDialog(
+    devices: List<UsbDevice>,
+    onDeviceSelected: (UsbDevice, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("USB Cihazı Seçin") },
+        text = {
+            LazyColumn {
+                items(devices) { device ->
+                    TextButton(onClick = { onDeviceSelected(device, "Direct") }) {
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(device.deviceName ?: "Bilinmiyor", fontWeight = FontWeight.Bold)
+                            Text("Vendor: ${device.vendorId}, Product: ${device.productId}")
+                        }
+                    }
+                    Divider()
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) {
+                Text("Kapat")
+            }
+        }
+    )
+}
 
 // --- Telemetry State Data Class ---
 data class DirectTelemetryState(
@@ -1015,7 +1383,7 @@ fun DroneControllerApp(
     // Aldığı baytları directDataChannel'a gönderir.
     class DirectUsbSerialListener : SerialInputOutputManager.Listener {
         // Seri porttan yeni veri geldiğinde çağrılır
-        val mavlinkBuffer = ByteArrayOutputStream()
+       /* val mavlinkBuffer = ByteArrayOutputStream()
 
         override fun onNewData(data: ByteArray) {
             for (byte in data) {
@@ -1026,6 +1394,21 @@ fun DroneControllerApp(
 
                 if (mavlinkBuffer.size() > 280) {  // MAVLink max paket boyutu
                     mavlinkBuffer.reset()
+                }
+            }
+        }*/
+
+        override fun onNewData(data: ByteArray) {
+            // MAVLink veri kontrolü yapabilirsiniz (isteğe bağlı)
+            scope.launch(Dispatchers.IO) {
+                try {
+                    if (!directDataChannel.isClosedForSend) {
+                        directDataChannel.send(data)
+                    }
+                } catch (e: ClosedSendChannelException) {
+                    Log.w(MainActivity.TAG, "[Direct Listener] Kanal kapalıyken veri gönderme denemesi.")
+                } catch (e: Exception) {
+                    Log.e(MainActivity.TAG, "[Direct Listener] Veri gönderirken hata", e)
                 }
             }
         }
@@ -1154,10 +1537,10 @@ fun DroneControllerApp(
             )
             Log.d(TAG, "[Proxy Connect] Adım 5 Tamamlandı: Çift Yönlü UDP Proxy görevi başlatıldı.") // ++ EKLENDİ
 
-            // 6. MAVSDK System’i keşfet
+            // 6. MAVSDK System'i keşfet
             // ... (kalan kod aynı)
 
-                // 6. MAVSDK System’i keşfet
+                // 6. MAVSDK System'i keşfet
                 Log.d(TAG, "[Proxy Connect] Adım 6: MAVSDK System Keşfediliyor (Timeout: 15sn)...") // ++ EKLENDİ
                 val discoveryTimeout = 15_000L
                 val discoveredSystem = withTimeoutOrNull(discoveryTimeout) {

@@ -61,6 +61,11 @@ dependencies {
     implementation ("com.github.mik3y:usb-serial-for-android:3.4.6")
     implementation("io.reactivex.rxjava2:rxandroid:2.1.1")
 
+    implementation ("com.google.maps.android:maps-compose:2.15.0")
+    implementation ("com.google.android.gms:play-services-maps:18.1.0")
+
+    implementation ("androidx.navigation:navigation-compose:2.7.4")
+
     // Asenkron işlemler için
     //implementation ("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3") // Örnek sürüm, projenize uygun olanı kullanın
