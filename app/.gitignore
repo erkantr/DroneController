@@ -1,1 +1,13 @@
-/build
+# Android Studio dosya ayarları
+.idea/
+*.iml
+
+# Gradle ilgili dosyalar
+.gradle/
+build/
+
+# Yerel konfigürasyon dosyası
+local.properties
+
+# İşletim sistemi dosyaları
+.DS_Store

@@ -80,6 +80,7 @@ dependencies {
 
     // Gerekli diğer bağımlılıklar
     //implementation ("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+  //  implementation ("androidx.compose.material:material:1.10.1")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
@@ -88,6 +89,7 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation("androidx.compose.material:material-icons-extended:1.6.7") // Veya projenizin Compose BOM versiyonu ile uyumlu en son sürüm
     implementation(libs.androidx.ui.test.junit4.android)
     implementation(libs.androidx.room.runtime.android)
     testImplementation(libs.junit)

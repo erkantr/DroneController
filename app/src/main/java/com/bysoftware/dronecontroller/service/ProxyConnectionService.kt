@@ -9,9 +9,9 @@ import com.bysoftware.dronecontroller.utils.format
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import io.mavsdk.System
 import io.mavsdk.mavsdkserver.MavsdkServer
-import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
-import io.reactivex.rxjava3.disposables.CompositeDisposable
-import io.reactivex.rxjava3.schedulers.Schedulers
+import io.reactivex.android.schedulers.AndroidSchedulers
+import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.schedulers.Schedulers
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -185,7 +185,7 @@ class ProxyConnectionService(
                     while (isActive) {
                         udpSocket.receive(packet)
                         if (packet.length > 0) {
-                            usbPort.write(packet.data, packet.offset, packet.length, 500)
+                            usbPort.write(packet.data, packet.offset)
                             Log.d(TAG, "[UDP Proxy] UDP -> USB: ${packet.length} byte gönderildi.")
                         } else {
                              Log.w(TAG, "[UDP Proxy] UDP'den boş paket alındı.")
@@ -276,7 +276,7 @@ class ProxyConnectionService(
                 .subscribe(
                     { battery ->
                         val batteryPercent = battery.remainingPercent?.let { (it * 100).format(0) + "%" } ?: "N/A"
-                        appendTelemetry("Pil: $batteryPercent, Volt: ${battery.voltageFv.format(2)}V\n")
+                        appendTelemetry("Pil: $batteryPercent, Volt: ${battery.voltageV.format(2)}V\n")
                     },
                     { error -> Log.w(TAG, "[Proxy Telemetry] Pil verisi alınamadı: ${error.message}") }
                 )

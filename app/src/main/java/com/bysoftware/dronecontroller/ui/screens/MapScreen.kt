@@ -14,50 +14,55 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
 import com.google.maps.android.compose.*
-import io.dronefleet.mavlink.common.Attitude
-import io.dronefleet.mavlink.common.GlobalPositionInt
-import io.dronefleet.mavlink.common.SysStatus
-import io.dronefleet.mavlink.common.VfrHud
 
 data class DroneData(
     val latitude: Double? = null,
     val longitude: Double? = null,
-    val altitude: Float? = null,
-    val heading: Float? = null,
-    val velocity: Float? = null,
+    val altitude: Double? = null,
+    val heading: Double? = null,
+    val groundspeed: Double? = null,
+    val roll: Double? = null,
+    val pitch: Double? = null,
+    val yaw: Double? = null,
     val batteryRemaining: Int? = null,
-    val groundspeed: Float? = null,
-    val roll: Float? = null,
-    val pitch: Float? = null,
-    val yaw: Float? = null
+    val armed: Boolean? = null,
+    val mode: String? = null,
+    val altitudeMsl: Double? = null,
+    val relativeAltitude: Double? = null,
+    val airSpeed: Double? = null,
+    val batteryVoltage: Double? = null,
+    val batteryCurrent: Double? = null,
+    val fixType: Int? = null,
+    val satellitesVisible: Int? = null,
+    val throttle: Int? = null,
+    val climbRate: Double? = null,
+    val telemetryTimestamp: Long = 0L,
+    val isProxyData: Boolean = false
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(
     droneData: DroneData,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    snackbarHostState: SnackbarHostState
 ) {
-    val defaultLocation = LatLng(39.9334, 32.8597) // Ankara (varsayılan)
-    val dronePosition = droneData.latitude?.let { lat ->
-        droneData.longitude?.let { lon ->
-            LatLng(lat, lon)
-        }
-    }
-    
+    val droneLocation = LatLng(droneData.latitude ?: 28.00095, droneData.longitude ?: -82.000) // Örnek Orlando, FL
     val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(
-            dronePosition ?: defaultLocation, 15f
-        )
+        position = CameraPosition.fromLatLngZoom(droneLocation, 15f) // Başlangıç zoom seviyesi
     }
 
-    // Update camera position when drone position changes
-    LaunchedEffect(dronePosition) {
-        dronePosition?.let {
-            cameraPositionState.position = CameraPosition.fromLatLngZoom(it, 15f)
+    // Drone lokasyonu değiştikçe kamerayı güncelle
+    LaunchedEffect(droneData.latitude, droneData.longitude) {
+        if (droneData.latitude != null && droneData.longitude != null) {
+            cameraPositionState.animate(
+                update = CameraUpdateFactory.newLatLngZoom(droneLocation, cameraPositionState.position.zoom),
+                durationMs = 1000
+            )
         }
     }
 
@@ -76,130 +81,85 @@ fun MapScreen(
                     }
                 }
             )
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            // Google Maps
+        },
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+    ) { paddingValues ->
+        Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
             GoogleMap(
                 modifier = Modifier.fillMaxSize(),
                 cameraPositionState = cameraPositionState,
-                properties = MapProperties(
-                    isMyLocationEnabled = true,
-                    mapType = MapType.HYBRID
-                )
+                properties = MapProperties(mapType = MapType.HYBRID),
+                uiSettings = MapUiSettings(zoomControlsEnabled = true, mapToolbarEnabled = true)
             ) {
-                // Drone marker
-                dronePosition?.let { position ->
+                if (droneData.latitude != null && droneData.longitude != null) {
                     Marker(
-                        state = MarkerState(position = position),
+                        state = MarkerState(position = droneLocation),
                         title = "Drone",
-                        snippet = "Lat: ${position.latitude}, Lng: ${position.longitude}"
+                        snippet = "Lat: ${droneData.latitude.format(6)}, Lon: ${droneData.longitude.format(6)}"
                     )
                 }
             }
-            
-            // Telemetri Paneli (QGC benzeri) - Box içinde Alignment.BottomCenter ile konumlandırılır
-            TelemetryPanel(
-                droneData = droneData,
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
+
+            // Telemetri Paneli (Haritanın üzerinde)
+            TelemetryOverlayPanel(droneData = droneData, modifier = Modifier.align(Alignment.BottomCenter))
         }
     }
 }
 
 @Composable
-fun TelemetryPanel(
-    droneData: DroneData,
-    modifier: Modifier = Modifier
-) {
-    Column(
+fun TelemetryOverlayPanel(droneData: DroneData, modifier: Modifier = Modifier) {
+    Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(16.dp)
-            .padding(bottom = 32.dp)
-            .background(
-                color = Color(0x80000000),
-                shape = RoundedCornerShape(16.dp)
-            )
-            .padding(16.dp)
+            .padding(8.dp),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)) // Hafif transparan
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            TelemetryItem(
-                title = "HIZ",
-                value = droneData.groundspeed?.toString() ?: "-- ",
-                unit = "m/s"
-            )
-            
-            TelemetryItem(
-                title = "YÜKSEKLİK",
-                value = droneData.altitude?.toString() ?: "-- ",
-                unit = "m"
-            )
-            
-            TelemetryItem(
-                title = "BATARYA",
-                value = droneData.batteryRemaining?.toString() ?: "-- ",
-                unit = "%"
-            )
-        }
-        
-        Spacer(modifier = Modifier.height(16.dp))
-        
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            TelemetryItem(
-                title = "ROLL",
-                value = droneData.roll?.toString() ?: "-- ",
-                unit = "°"
-            )
-            
-            TelemetryItem(
-                title = "PITCH",
-                value = droneData.pitch?.toString() ?: "-- ",
-                unit = "°"
-            )
-            
-            TelemetryItem(
-                title = "YAW",
-                value = droneData.yaw?.toString() ?: "-- ",
-                unit = "°"
-            )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                CompactTelemetryItem(label = "HIZ", value = droneData.groundspeed?.format(1) ?: "--", unit = "m/s")
+                CompactTelemetryItem(label = "YÜKSEKLİK", value = droneData.altitude?.format(1) ?: "--", unit = "m")
+                CompactTelemetryItem(label = "BATARYA", value = droneData.batteryRemaining?.format() ?: "--", unit = "%")
+            }
+            Divider(modifier = Modifier.padding(vertical = 4.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+                CompactTelemetryItem(label = "ROLL", value = droneData.roll?.format(1) ?: "--", unit = "°")
+                CompactTelemetryItem(label = "PITCH", value = droneData.pitch?.format(1) ?: "--", unit = "°")
+                CompactTelemetryItem(label = "YAW/HDG", value = "${droneData.yaw?.format(1) ?: "--"}° (${droneData.heading?.format(0) ?: "--"}°)", unit = "")
+            }
         }
     }
 }
 
 @Composable
-fun TelemetryItem(title: String, value: String, unit: String) {
+fun CompactTelemetryItem(label: String, value: String, unit: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            text = title,
-            fontSize = 12.sp,
-            color = Color.LightGray
-        )
-        
+        Text(text = label, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.Bottom) {
             Text(
                 text = value,
-                fontSize = 20.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = MaterialTheme.colorScheme.onSurface
             )
-            
-            Text(
-                text = unit,
-                fontSize = 12.sp,
-                color = Color.LightGray,
-                modifier = Modifier.padding(start = 2.dp, bottom = 2.dp)
-            )
+            if (unit.isNotBlank()) {
+                Text(
+                    text = unit,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Light,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 2.dp, bottom = 2.dp)
+                )
+            }
         }
     }
-} 
+}
+
+// MapScreen.kt içinde veya utils içinde zaten varsa bu format extension'larına gerek yok.
+// Eğer yoksa, DroneControllerMainScreen.kt'den kopyalanabilir veya ortak bir dosyaya taşınabilir.
+// fun Double.format(digits: Int): String = "%.${digits}f".format(this)
+// fun Int.format(): String = this.toString() 
